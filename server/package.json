@@ -1,0 +1,28 @@
+{
+  "name": "@bitsocial/indexer-server",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Crawler + REST/search API for bitsocial-indexer",
+  "license": "GPL-3.0-or-later",
+  "author": "Bitsocial Forge",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "seed": "tsx src/db/seed.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.0",
+    "@pkcprotocol/pkc-js": "0.0.62",
+    "better-sqlite3": "^11.0.0",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,36 @@
+# Reference deployment. `docker compose up` runs the API + web UI with an empty
+# index. Uncomment the `daemon` service and set COMMUNITIES to index live data.
+services:
+  # The bitsocial-cli daemon the crawler talks to (PKC RPC). You need a real
+  # image/build of bitsocial-cli here; left commented as it's the integration
+  # point each operator wires up.
+  # daemon:
+  #   image: ghcr.io/bitsocialnet/bitsocial-cli:latest
+  #   command: ["daemon"]   # expose the PKC RPC on :9138 (see bitsocial-cli docs)
+  #   ports: ["9138:9138"]
+  #   volumes: ["bitsocial-data:/root/.bitsocial"]
+
+  server:
+    build: ./server
+    environment:
+      PORT: 4000
+      DB_PATH: /data/indexer.db
+      PKC_RPC_URL: ws://daemon:9138
+      COMMUNITIES: ${COMMUNITIES:-}
+      COMMUNITIES_SOURCE: ${COMMUNITIES_SOURCE:-}
+      SEED_DEMO: ${SEED_DEMO:-false}
+      SITE_NAME: ${SITE_NAME:-Bitsocial Indexer}
+      SITE_URL: ${SITE_URL:-http://localhost:4000}
+    volumes: ["index-data:/data"]
+    ports: ["4000:4000"]
+
+  webui:
+    build: ./webui
+    environment:
+      INDEXER_API: http://server:4000
+    ports: ["3000:3000"]
+    depends_on: [server]
+
+volumes:
+  index-data:
+  # bitsocial-data:

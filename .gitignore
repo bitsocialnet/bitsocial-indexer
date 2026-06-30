@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# data + secrets
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+*.local
+
+# typescript / next
+next-env.d.ts
+*.tsbuildinfo
+
+# misc
+.DS_Store
+*.log
+coverage/
+.turbo/
