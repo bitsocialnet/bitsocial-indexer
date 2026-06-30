@@ -21,6 +21,10 @@ export const config = {
 
   crawlIntervalMs: Number(process.env.CRAWL_INTERVAL_MS ?? 60_000),
 
+  /** Pagination bounds per crawl pass (keeps a single tick bounded). */
+  crawlMaxPages: Number(process.env.CRAWL_MAX_PAGES ?? 20),
+  crawlMaxReplyDepth: Number(process.env.CRAWL_MAX_REPLY_DEPTH ?? 6),
+
   /** Load demo data on boot (same as `npm run seed`). */
   seedDemo: process.env.SEED_DEMO === 'true',
 

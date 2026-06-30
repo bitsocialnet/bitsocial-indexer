@@ -36,8 +36,8 @@ async function connect(): Promise<PkcClient> {
   console.log(`[pkc] connected via ${config.pkcRpcUrl}`);
 
   return {
-    getCommunity: (address) => pkc.getCommunity(address),
-    getComment: (cid) => pkc.getComment(cid),
+    getCommunity: (address) => pkc.getCommunity({ address }),
+    getComment: (cid) => pkc.getComment({ cid }),
     destroy: async () => {
       await pkc.destroy?.();
       clientPromise = null;
