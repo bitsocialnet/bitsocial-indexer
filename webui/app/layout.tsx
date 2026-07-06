@@ -4,14 +4,19 @@ import type { ReactNode } from 'react';
 import './globals.css';
 import { BrandHeader } from '@/components/BrandHeader';
 import { SiteFooter } from '@/components/SiteFooter';
-import { siteName, siteTitle } from '@/lib/site';
+import { siteName, siteTitle, siteUrl } from '@/lib/site';
 
 const exo = Exo({ subsets: ['latin'], weight: ['500', '600', '700'], variable: '--font-exo', display: 'swap' });
 const manrope = Manrope({ subsets: ['latin'], variable: '--font-manrope', display: 'swap' });
 
+const description = 'A self-hostable search index for the Bitsocial network.';
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: { default: siteTitle, template: `%s · ${siteName}` },
-  description: 'A self-hostable search index for the Bitsocial network.',
+  description,
+  openGraph: { siteName: siteTitle, type: 'website', title: siteTitle, description },
+  twitter: { card: 'summary' },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -1,13 +1,49 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getThread } from '@/lib/api';
-import { timeAgo } from '@/lib/format';
+import { excerpt, timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
+
+// Threads are archived content: cache the page, revalidate for late replies.
+export const revalidate = 300;
+
+type Params = { params: Promise<{ cid: string }> };
 
 function score(c: Comment) {
   return c.upvote_count - c.downvote_count;
 }
 
-export default async function ThreadPage({ params }: { params: Promise<{ cid: string }> }) {
+function threadTitle(post: Comment): string {
+  return post.title || excerpt(post.content, 70) || 'untitled';
+}
+
+export async function generateMetadata({ params }: Params): Promise<Metadata> {
+  const { cid } = await params;
+  const thread = await getThread(decodeURIComponent(cid));
+  if (!thread) return { title: 'Post not found', robots: { index: false } };
+
+  const { post } = thread;
+  const title = threadTitle(post);
+  const description =
+    excerpt(post.content) || `A thread from ${post.community_address} with ${post.reply_count} replies.`;
+  const canonical = `/c/${encodeURIComponent(post.cid)}`;
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      title,
+      description,
+      url: canonical,
+      type: 'article',
+      publishedTime: new Date(post.timestamp * 1000).toISOString(),
+    },
+    twitter: { card: 'summary', title, description },
+  };
+}
+
+export default async function ThreadPage({ params }: Params) {
   const { cid } = await params;
   const thread = await getThread(decodeURIComponent(cid));
 
@@ -26,7 +62,7 @@ export default async function ThreadPage({ params }: { params: Promise<{ cid: st
       </div>
 
       <div className="card thread-op">
-        <h1>{post.title || 'untitled'}</h1>
+        <h1>{threadTitle(post)}</h1>
         <div className="meta">
           <span>▲ {score(post)}</span>
           <span>·</span>

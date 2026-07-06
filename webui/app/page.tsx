@@ -1,8 +1,18 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { EmptyState } from '@/components/EmptyState';
 import { ApiDown } from '@/components/Notice';
 import { PostCard } from '@/components/PostCard';
 import { getCommunities, getHealth, getPosts } from '@/lib/api';
+
+// Render at request time (never bake an "API down" page into the build); the
+// fetches themselves are cached in the data cache (see lib/api.ts).
+export const dynamic = 'force-dynamic';
+
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+  openGraph: { url: '/' },
+};
 
 export default async function Home() {
   const [health, communitiesRes] = await Promise.all([getHealth(), getCommunities()]);

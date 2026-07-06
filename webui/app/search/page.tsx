@@ -4,9 +4,20 @@ import { PostCard } from '@/components/PostCard';
 import { SearchBar } from '@/components/SearchBar';
 import { search } from '@/lib/api';
 
-export const metadata: Metadata = { title: 'Search' };
+type SearchParams = { searchParams: Promise<{ q?: string }> };
 
-export default async function SearchPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+export async function generateMetadata({ searchParams }: SearchParams): Promise<Metadata> {
+  const { q } = await searchParams;
+  const query = (q ?? '').trim();
+  return {
+    title: query ? `${query} — search` : 'Search',
+    alternates: { canonical: '/search' },
+    // Result pages are infinite query-space; keep them out of the index.
+    robots: query ? { index: false, follow: true } : undefined,
+  };
+}
+
+export default async function SearchPage({ searchParams }: SearchParams) {
   const { q } = await searchParams;
   const query = (q ?? '').trim();
   const result = query ? await search(query) : null;
