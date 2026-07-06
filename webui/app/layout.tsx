@@ -3,6 +3,7 @@ import { Exo, Manrope } from 'next/font/google';
 import type { ReactNode } from 'react';
 import './globals.css';
 import { BrandHeader } from '@/components/BrandHeader';
+import { DevTools } from '@/components/DevTools';
 import { SiteFooter } from '@/components/SiteFooter';
 import { siteName, siteTitle, siteUrl, theme } from '@/lib/site';
 
@@ -23,6 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" data-theme={theme} className={`${exo.variable} ${manrope.variable}`}>
       <body>
+        <DevTools />
         <div className="glow" aria-hidden />
         <BrandHeader />
         <main className="container">{children}</main>
