@@ -9,3 +9,10 @@ export const siteUrl = (process.env.SITE_URL ?? 'http://localhost:3000').replace
 
 /** UI skin: "default" (Bitsocial dark) or "5chan" (classic imageboard). */
 export const theme = process.env.THEME === '5chan' ? '5chan' : 'default';
+
+/**
+ * Optional footer attribution (e.g. "A Bitsocial Forge product"). Nothing is
+ * rendered unless BRAND_TEXT is set; BRAND_URL turns it into a link.
+ */
+export const brandText = process.env.BRAND_TEXT ?? '';
+export const brandUrl = process.env.BRAND_URL ?? '';
