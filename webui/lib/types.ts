@@ -26,6 +26,12 @@ export interface Comment {
   downvote_count: number;
   reply_count: number;
   indexed_at: number;
+  /** 1 when the thread is no longer live upstream (served from the archive). */
+  archived: 0 | 1;
+  /** Tombstones: removed (mod) / deleted (author) — content fields come back null. */
+  removed: 0 | 1;
+  deleted: 0 | 1;
+  mod_reason: string | null;
 }
 
 export interface PostPage {

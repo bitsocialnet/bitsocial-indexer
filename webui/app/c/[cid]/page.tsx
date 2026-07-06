@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { Prose } from '@/components/Prose';
+import { isTombstone, Tombstone } from '@/components/Tombstone';
 import { getThread } from '@/lib/api';
 import { excerpt, timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
@@ -14,6 +16,8 @@ function score(c: Comment) {
 }
 
 function threadTitle(post: Comment): string {
+  if (post.removed) return '[removed]';
+  if (post.deleted) return '[deleted]';
   return post.title || excerpt(post.content, 70) || 'untitled';
 }
 
@@ -40,6 +44,8 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
       publishedTime: new Date(post.timestamp * 1000).toISOString(),
     },
     twitter: { card: 'summary', title, description },
+    // Redacted tombstones have no content worth indexing.
+    robots: isTombstone(post) ? { index: false } : undefined,
   };
 }
 
@@ -58,7 +64,12 @@ export default async function ThreadPage({ params }: Params) {
       <div className="results-head">
         <Link href={`/p/${encodeURIComponent(post.community_address)}`} className="chip">
           {post.community_address}
-        </Link>
+        </Link>{' '}
+        {post.archived ? (
+          <span className="flag flag-archived" title="No longer live upstream — preserved by this archive">
+            Archived
+          </span>
+        ) : null}
       </div>
 
       <div className="card thread-op">
@@ -77,14 +88,14 @@ export default async function ThreadPage({ params }: Params) {
             </a>
           </p>
         ) : null}
-        {post.content ? <p className="prose">{post.content}</p> : null}
+        {isTombstone(post) ? <Tombstone comment={post} /> : post.content ? <Prose text={post.content} /> : null}
       </div>
 
       <h2 className="section-title">
         {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
       </h2>
       {replies.map((r) => (
-        <div className="reply" key={r.cid}>
+        <div className={`reply${isTombstone(r) ? ' reply-tombstone' : ''}`} key={r.cid}>
           <div className="meta">
             <span>{r.author_name ?? 'anon'}</span>
             <span>·</span>
@@ -92,7 +103,7 @@ export default async function ThreadPage({ params }: Params) {
             <span>·</span>
             <span>▲ {score(r)}</span>
           </div>
-          <p className="prose">{r.content}</p>
+          {isTombstone(r) ? <Tombstone comment={r} /> : <Prose text={r.content ?? ''} />}
         </div>
       ))}
     </article>

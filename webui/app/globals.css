@@ -24,6 +24,7 @@
   --muted: var(--silver);
   --accent: var(--electric-blue);
   --accent-2: var(--protocol-blue);
+  --greentext: #8ea062;
 
   --radius-pill: 999px;
   --radius-sm: 0.75rem;
@@ -149,6 +150,17 @@ main.container { flex: 1; padding-top: 2.25rem; padding-bottom: 4rem; }
 .prose { color: var(--silver-bright); white-space: pre-wrap; margin: 0.5rem 0 0; }
 .reply { padding: 0.9rem 1.15rem; margin: 0 0 0.6rem; background: var(--panel); border: 1px solid var(--border); border-left: 2px solid var(--accent-2); border-radius: var(--radius-sm); }
 .muted { color: var(--muted); }
+.greentext { color: var(--greentext); }
+
+/* ── archive / moderation state ── */
+.flag {
+  font-family: var(--font-display); font-size: 0.62rem; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 0.12rem 0.5rem; border-radius: var(--radius-pill); border: 1px solid;
+}
+.flag-archived { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.tombstone { color: var(--muted); font-style: italic; }
+.reply-tombstone { border-left-color: var(--border); }
 
 /* ── footer ── */
 .site-footer { border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }

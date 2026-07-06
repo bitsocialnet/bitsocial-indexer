@@ -21,6 +21,11 @@ export function PostCard({ post }: { post: Comment }) {
           <time dateTime={new Date(post.timestamp * 1000).toISOString()}>{timeAgo(post.timestamp)}</time>
           <span>·</span>
           <span>{post.reply_count} {post.reply_count === 1 ? 'reply' : 'replies'}</span>
+          {post.archived ? (
+            <span className="flag flag-archived" title="No longer live upstream — preserved by this archive">
+              Archived
+            </span>
+          ) : null}
         </div>
         {post.title && post.content ? <p className="snippet">{post.content.slice(0, 180)}</p> : null}
       </div>
