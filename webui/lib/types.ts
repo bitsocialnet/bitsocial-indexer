@@ -32,6 +32,10 @@ export interface Comment {
   removed: 0 | 1;
   deleted: 0 | 1;
   mod_reason: string | null;
+  /** Operator takedown (BLOCKLIST_SOURCE) — redacted like removed/deleted. */
+  takedown: 0 | 1;
+  /** Operator-side bookkeeping (e.g. "DMCA #42") — not shown in the UI. */
+  takedown_reason: string | null;
 }
 
 export interface PostPage {

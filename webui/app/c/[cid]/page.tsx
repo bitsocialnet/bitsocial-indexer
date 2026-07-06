@@ -16,7 +16,7 @@ function score(c: Comment) {
 }
 
 function threadTitle(post: Comment): string {
-  if (post.removed) return '[removed]';
+  if (post.takedown || post.removed) return '[removed]';
   if (post.deleted) return '[deleted]';
   return post.title || excerpt(post.content, 70) || 'untitled';
 }
