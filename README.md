@@ -69,8 +69,9 @@ communities (below) to index live content.
 
 ## Configuration
 
-All config is environment variables (see [`.env.example`](.env.example)). The
-two that matter most:
+All config is environment variables (see [`.env.example`](.env.example)).
+
+### `server/`
 
 | Var | Default | Meaning |
 |-----|---------|---------|
@@ -78,9 +79,26 @@ two that matter most:
 | `COMMUNITIES_SOURCE` | _(empty)_ | URL/path to a JSON list of community addresses (e.g. a client's directory). Overrides/augments `COMMUNITIES`. |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
+| `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). `CORS_ORIGIN` is accepted as a legacy fallback. |
 
 If neither `COMMUNITIES` nor `COMMUNITIES_SOURCE` is set, the crawler stays
 idle and the indexer serves nothing. That is intentional.
+
+### `webui/`
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `INDEXER_API` | `http://localhost:4000` | Where the UI reads the API from (server-side fetch) |
+| `SITE_NAME` | `Bitsocial` | Instance name in the header / page titles |
+| `SITE_BADGE` | `Indexer` | Small pill next to the name (empty to hide) |
+| `SITE_URL` | `http://localhost:3000` | Public origin of the web UI — canonical URLs, OpenGraph tags, `robots.txt`, sitemaps |
+| `THEME` | `default` | UI skin: `default` (Bitsocial dark) or `5chan` (classic imageboard look) |
+| `BRAND_TEXT` | _(empty)_ | Optional footer attribution line, e.g. `A Bitsocial Forge product`. Unset = nothing rendered |
+| `BRAND_URL` | _(empty)_ | Makes `BRAND_TEXT` a link |
+
+The web UI serves its own `robots.txt` and a `sitemap.xml` **sitemap index**
+(one child sitemap per community, capped at the 5,000 most recent posts each,
+enumerated through the paginated `/api/posts` listing and cached for an hour).
 
 ## API
 
