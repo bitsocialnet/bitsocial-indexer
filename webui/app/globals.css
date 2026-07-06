@@ -1,9 +1,11 @@
 /*
  * Bitsocial brand skin for the neutral indexer UI.
  *
- * Tokens reproduced from bitsocial-web DESIGN.md (a spec, not code). To re-skin
- * an instance (e.g. an imageboard look), override the :root variables below and
- * the component classes — this file is the single theming surface.
+ * Tokens reproduced from bitsocial-web DESIGN.md (a spec, not code). This file
+ * is the single theming surface: themes are selected at runtime via the THEME
+ * env var, which sets data-theme on <html> — see the html[data-theme='5chan']
+ * block at the bottom. To re-skin an instance further, override the :root
+ * variables below (or add another data-theme block).
  */
 :root {
   /* brand palette */
@@ -166,3 +168,75 @@ main.container { flex: 1; padding-top: 2.25rem; padding-bottom: 4rem; }
 .site-footer { border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
 .site-footer .container { padding-top: 1.5rem; padding-bottom: 2.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; justify-content: space-between; }
 .site-footer a { color: var(--accent); }
+
+/*
+ * ── THEME=5chan — classic Yotsuba imageboard skin ──
+ * Palette recycled from the 5chan client's yotsuba theme: cream/beige
+ * backgrounds (#ffe / #f0e0d6 / #d9bfb7), maroon text, #cc1105 subjects,
+ * #117743 names, #789922 greentext, blue/red links, compact density.
+ */
+html[data-theme='5chan'] {
+  color-scheme: light;
+  --bg: #ffffee;
+  --panel: #f0e0d6;
+  --panel-2: #ead6ca;
+  --border: #d9bfb7;
+  --text: maroon;
+  --muted: #707070;
+  --accent: #800000;
+  --accent-2: #cc1105;
+  --amber: #800000;
+  --greentext: #789922;
+  --radius-pill: 3px;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-card: 0;
+  --font-display: tahoma, arial, helvetica, sans-serif;
+  --font-body: arial, helvetica, sans-serif;
+}
+html[data-theme='5chan'] body {
+  font-size: 13px; line-height: 1.5;
+  background-image: linear-gradient(#fed6af, var(--bg) 220px);
+  background-repeat: no-repeat;
+}
+html[data-theme='5chan'] .glow { display: none; }
+html[data-theme='5chan'] h1, html[data-theme='5chan'] h2, html[data-theme='5chan'] h3 { letter-spacing: 0; }
+
+html[data-theme='5chan'] .site-header { background: #fca; backdrop-filter: none; border-bottom: 1px solid var(--accent); }
+html[data-theme='5chan'] .header-inner { height: 52px; }
+html[data-theme='5chan'] .brand-name { color: var(--accent); }
+html[data-theme='5chan'] .brand-orb { background: var(--accent); box-shadow: none; }
+html[data-theme='5chan'] .badge { color: var(--accent); border-color: var(--accent); background: #ffe; }
+
+html[data-theme='5chan'] .input { background: #fff; color: #000; border: 1px solid #aaa; }
+html[data-theme='5chan'] .input:focus { border-color: #ea8; box-shadow: none; }
+html[data-theme='5chan'] .btn { background: #ea8; color: var(--accent); border: 1px solid var(--accent); font-weight: 700; }
+html[data-theme='5chan'] .btn:hover { filter: none; background: #fca; }
+
+html[data-theme='5chan'] .section-title { color: var(--accent); letter-spacing: 0.06em; }
+html[data-theme='5chan'] .card { box-shadow: none; }
+html[data-theme='5chan'] .post { padding: 0.5rem 0.7rem; margin-bottom: 0.35rem; gap: 0.7rem; }
+html[data-theme='5chan'] .post:hover { border-color: var(--border); }
+html[data-theme='5chan'] .post-score { color: var(--accent); min-width: 2.6rem; }
+html[data-theme='5chan'] .post-title { color: #cc1105; font-weight: 700; font-size: 1rem; }
+html[data-theme='5chan'] .post-title:hover { color: red; }
+html[data-theme='5chan'] .meta { color: #707070; margin-top: 0.2rem; }
+html[data-theme='5chan'] .meta > span:first-child { color: var(--accent); }
+html[data-theme='5chan'] .chip { background: #ffe; color: navy; text-decoration: underline; }
+html[data-theme='5chan'] .chip:hover { color: red; border-color: var(--border); }
+html[data-theme='5chan'] .snippet { color: maroon; }
+
+html[data-theme='5chan'] .community-list a:hover { background: var(--panel); }
+html[data-theme='5chan'] .results-head h1 { color: #cc1105; }
+html[data-theme='5chan'] .results-head p { color: maroon; }
+html[data-theme='5chan'] .thread-op { padding: 0.85rem 1rem; }
+html[data-theme='5chan'] .thread-op h1 { color: #cc1105; font-size: 1.2rem; }
+html[data-theme='5chan'] .prose { color: maroon; }
+html[data-theme='5chan'] .reply { padding: 0.55rem 0.8rem; margin-bottom: 0.3rem; border-left: 1px solid var(--border); }
+html[data-theme='5chan'] .reply .meta > span:first-child { color: #117743; font-weight: 700; }
+html[data-theme='5chan'] .notice { border-left-color: var(--accent); color: maroon; }
+html[data-theme='5chan'] .flag-archived { background: #fca; }
+
+html[data-theme='5chan'] .site-footer { background: #fed; border-top: 1px solid var(--border); color: var(--accent); }
+html[data-theme='5chan'] .site-footer a { color: #00e; text-decoration: underline; }
+html[data-theme='5chan'] .site-footer a:hover { color: red; }

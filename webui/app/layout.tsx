@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import './globals.css';
 import { BrandHeader } from '@/components/BrandHeader';
 import { SiteFooter } from '@/components/SiteFooter';
-import { siteName, siteTitle, siteUrl } from '@/lib/site';
+import { siteName, siteTitle, siteUrl, theme } from '@/lib/site';
 
 const exo = Exo({ subsets: ['latin'], weight: ['500', '600', '700'], variable: '--font-exo', display: 'swap' });
 const manrope = Manrope({ subsets: ['latin'], variable: '--font-manrope', display: 'swap' });
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${exo.variable} ${manrope.variable}`}>
+    <html lang="en" data-theme={theme} className={`${exo.variable} ${manrope.variable}`}>
       <body>
         <div className="glow" aria-hidden />
         <BrandHeader />
