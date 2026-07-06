@@ -54,8 +54,14 @@ function safeJson(value: unknown): string | null {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function mapComment(c: any, communityAddress: string): CommentInput | null {
+/**
+ * Map a pkc-js page comment to a row. Moderation flags may live flattened on
+ * the comment itself and/or on its CommentUpdate (`raw.commentUpdate`); an
+ * author delete additionally hides under the update's `edit`. Exported for tests.
+ */
+export function mapComment(c: any, communityAddress: string, seenAt = nowSec()): CommentInput | null {
   if (!c?.cid) return null;
+  const update = c.raw?.commentUpdate ?? {};
   return {
     cid: c.cid,
     community_address: c.communityAddress ?? communityAddress,
@@ -73,6 +79,13 @@ function mapComment(c: any, communityAddress: string): CommentInput | null {
     downvote_count: c.downvoteCount ?? 0,
     reply_count: c.replyCount ?? 0,
     raw: safeJson(c.raw ?? null),
+    first_seen_at: seenAt,
+    last_seen_at: seenAt,
+    pending_approval: Boolean(c.pendingApproval ?? update.pendingApproval),
+    removed: Boolean(c.removed ?? update.removed),
+    deleted: Boolean(c.deleted ?? c.edit?.deleted ?? update.edit?.deleted),
+    mod_reason: c.reason ?? update.reason ?? c.edit?.reason ?? update.edit?.reason ?? null,
+    upstream_archived: Boolean(c.archived ?? update.archived),
   };
 }
 
@@ -109,30 +122,39 @@ async function collectFromPages(pagesObj: any, maxPages: number, seen: Set<strin
 }
 
 /** Map a post and recurse into its reply tree, bounded by reply depth. */
-async function collectThread(comment: any, address: string, out: CommentInput[], seen: Set<string>, depth: number): Promise<void> {
-  const mapped = mapComment(comment, address);
+async function collectThread(comment: any, address: string, out: CommentInput[], seen: Set<string>, depth: number, seenAt: number): Promise<void> {
+  const mapped = mapComment(comment, address, seenAt);
   if (mapped) out.push(mapped);
   if (depth >= config.crawlMaxReplyDepth) return;
   const replies = await collectFromPages(comment?.replies, config.crawlMaxPages, seen);
-  for (const reply of replies) await collectThread(reply, address, out, seen, depth + 1);
+  for (const reply of replies) await collectThread(reply, address, out, seen, depth + 1, seenAt);
 }
 
-/** Fetch a community's posts (+ reply threads) via PKC and upsert them. */
+/**
+ * Fetch a community's posts (+ reply threads) via PKC and upsert them.
+ *
+ * Everything collected in one pass is stamped with the same `crawledAt`, which
+ * also becomes the community's `last_indexed_at`. A comment whose last_seen_at
+ * is older than the community's last_indexed_at therefore fell out of the live
+ * pages (archived/purged upstream) — it stays in the index and is served with
+ * `archived: 1`.
+ */
 async function indexCommunity(address: string): Promise<number> {
   const pkc = await getPkcClient();
   const community: any = await pkc.getCommunity(address);
+  const crawledAt = nowSec();
 
   const out: CommentInput[] = [];
   const seen = new Set<string>();
   const posts = await collectFromPages(community?.posts, config.crawlMaxPages, seen);
-  for (const post of posts) await collectThread(post, address, out, seen, 0);
+  for (const post of posts) await collectThread(post, address, out, seen, 0, crawledAt);
 
   const inserted = insertComments(out);
   upsertCommunity({
     address,
     title: community?.title ?? null,
     description: community?.description ?? null,
-    last_indexed_at: nowSec(),
+    last_indexed_at: crawledAt,
   });
   return inserted;
 }

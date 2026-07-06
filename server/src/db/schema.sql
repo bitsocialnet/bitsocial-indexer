@@ -29,7 +29,18 @@ CREATE TABLE IF NOT EXISTS comments (
   reply_count       INTEGER NOT NULL DEFAULT 0,
   raw               TEXT,                      -- full source comment as JSON
   indexed_at        INTEGER NOT NULL,
-  removed_at        INTEGER                    -- soft-delete / moderation
+  removed_at        INTEGER,                   -- when we first saw the removed/deleted flag
+  -- Archive bookkeeping: when the crawler first/last saw this comment upstream.
+  first_seen_at     INTEGER,
+  last_seen_at      INTEGER,
+  -- Moderation state (from the comment / its CommentUpdate). Rows are NEVER
+  -- deleted: removed/deleted content is kept but redacted when served
+  -- (tombstone), pending_approval rows are never served at all.
+  pending_approval  INTEGER NOT NULL DEFAULT 0,
+  removed           INTEGER NOT NULL DEFAULT 0, -- mod-removed
+  deleted           INTEGER NOT NULL DEFAULT 0, -- author-deleted
+  mod_reason        TEXT,
+  upstream_archived INTEGER NOT NULL DEFAULT 0  -- explicit `archived` flag in a CommentUpdate
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_community ON comments(community_address);
