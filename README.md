@@ -69,7 +69,7 @@ communities (below) to index live content.
 
 ## Configuration
 
-All config is environment variables (see [`.env.example`](.env.example)).
+All config is environment variables (see [`server/.env.example`](server/.env.example)).
 
 ### `server/`
 
@@ -80,9 +80,26 @@ All config is environment variables (see [`.env.example`](.env.example)).
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
 | `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). `CORS_ORIGIN` is accepted as a legacy fallback. |
+| `BLOCKLIST_SOURCE` | _(empty)_ | Path to a JSON file of CIDs to take down (operator blocklist, see below). |
 
 If neither `COMMUNITIES` nor `COMMUNITIES_SOURCE` is set, the crawler stays
 idle and the indexer serves nothing. That is intentional.
+
+#### Takedowns (`BLOCKLIST_SOURCE`)
+
+An archive keeps serving content after it disappears from the source network,
+so upstream moderation can no longer reach it — takedown requests (DMCA,
+illegal content) need an operator-side mechanism. Point `BLOCKLIST_SOURCE` at
+a JSON file where each entry is a bare CID string or
+`{ "cid": "…", "scope": "comment" | "thread", "reason": "…" }` (`scope`
+defaults to `comment`; `thread` takes down a post **and all its replies** by
+the post's CID). Add a CID to the file and it is redacted within a minute —
+the file is re-read whenever it changes, no restart needed; remove the entry
+and the stored content is served again (the redaction never destroys the
+archived data). Blocklisted comments leave listings and search but stay in
+threads as redacted tombstones, marked `takedown: 1` (plus the optional
+`takedown_reason`) on the API so UIs can distinguish them from upstream
+moderation, and they stay redacted across re-crawls.
 
 ### `webui/`
 

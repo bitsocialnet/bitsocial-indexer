@@ -40,6 +40,8 @@ export interface Comment {
   deleted: number;
   mod_reason: string | null;
   upstream_archived: number;
+  takedown: number;
+  takedown_reason: string | null;
 }
 
 /** A comment as served by the API: archive/tombstone state made explicit. */
@@ -90,7 +92,7 @@ const SERVED_SELECT = `SELECT c.*, ${ARCHIVED_SQL} AS archived
 /** Filter applied to every listing/search: mod-queue content is never served. */
 const NOT_PENDING = 'c.pending_approval = 0';
 /** Listings and search additionally hide tombstones (they have no content). */
-const VISIBLE = `${NOT_PENDING} AND c.removed = 0 AND c.deleted = 0`;
+const VISIBLE = `${NOT_PENDING} AND c.removed = 0 AND c.deleted = 0 AND c.takedown = 0`;
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -118,6 +120,8 @@ function migrate(database: Database.Database): void {
     deleted: 'INTEGER NOT NULL DEFAULT 0',
     mod_reason: 'TEXT',
     upstream_archived: 'INTEGER NOT NULL DEFAULT 0',
+    takedown: 'INTEGER NOT NULL DEFAULT 0',
+    takedown_reason: 'TEXT',
   };
   const existing = new Set((database.pragma(`table_info('comments')`) as { name: string }[]).map((c) => c.name));
   let added = false;
@@ -144,11 +148,12 @@ function one<T>(sql: string, params: Record<string, unknown> = {}): T | undefine
 }
 
 /**
- * Tombstone redaction: removed (mod) / deleted (author) comments keep their row
- * so thread structure survives, but their content is never served.
+ * Tombstone redaction: removed (mod) / deleted (author) / takedown (operator
+ * blocklist) comments keep their row so thread structure survives, but their
+ * content is never served.
  */
 function serve(row: ServedComment): ServedComment {
-  if (!row.removed && !row.deleted) return row;
+  if (!row.removed && !row.deleted && !row.takedown) return row;
   return {
     ...row,
     title: null,
@@ -191,7 +196,7 @@ export function listCommunities(): CommunitySummary[] {
     `SELECT c.*,
             (SELECT COUNT(*) FROM comments cm
               WHERE cm.community_address = c.address AND cm.depth = 0
-                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0) AS post_count
+                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0 AND cm.takedown = 0) AS post_count
        FROM communities c
        ORDER BY post_count DESC, c.address ASC`,
   );
@@ -202,7 +207,7 @@ export function getCommunity(address: string): CommunitySummary | undefined {
     `SELECT c.*,
             (SELECT COUNT(*) FROM comments cm
               WHERE cm.community_address = c.address AND cm.depth = 0
-                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0) AS post_count
+                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0 AND cm.takedown = 0) AS post_count
        FROM communities c WHERE c.address = @address`,
     { address },
   );
@@ -267,6 +272,87 @@ export function getThread(cid: string): Thread | null {
     { root: post.post_cid },
   );
   return { post: serve(post), replies: replies.map(serve) };
+}
+
+// ── operator takedown blocklist ──────────────────────────────────────────────
+
+export type BlocklistScope = 'comment' | 'thread';
+
+export interface BlocklistEntry {
+  cid: string;
+  /** "comment" redacts one comment; "thread" redacts a post AND all its replies. */
+  scope: BlocklistScope;
+  reason: string | null;
+}
+
+/** The active blocklist, kept in memory so ingest can consult it per comment. */
+let blocklist = new Map<string, BlocklistEntry>();
+
+/** The entry redacting this comment, if any (its own CID, or its thread's root). */
+function blockedBy(cid: string, postCid: string): BlocklistEntry | undefined {
+  const own = blocklist.get(cid);
+  if (own) return own;
+  const root = blocklist.get(postCid);
+  return root?.scope === 'thread' ? root : undefined;
+}
+
+/**
+ * Apply the operator blocklist (see ../blocklist.ts for the file loader).
+ * Same serve-time redaction as removed/deleted tombstones, but operator-owned
+ * and fully reversible: content columns are never touched — only the `takedown`
+ * flag and the FTS index. Rows whose entry disappeared from the list are
+ * restored (flag cleared, FTS re-indexed from the stored content).
+ */
+export function setBlocklist(entries: BlocklistEntry[]): void {
+  blocklist = new Map(entries.map((e) => [e.cid, e]));
+  const database = getDb();
+  const deleteFts = database.prepare('DELETE FROM comments_fts WHERE cid = ?');
+  const insertFts = database.prepare(
+    'INSERT INTO comments_fts (cid, title, content, author_name) VALUES (@cid, @title, @content, @author_name)',
+  );
+  const redact = database.prepare(
+    'UPDATE comments SET takedown = 1, takedown_reason = @reason WHERE cid = @cid',
+  );
+  const restore = database.prepare(
+    'UPDATE comments SET takedown = 0, takedown_reason = NULL WHERE cid = ?',
+  );
+
+  database.transaction(() => {
+    // Restore rows that are no longer matched by any entry.
+    const taken = database
+      .prepare(
+        `SELECT cid, post_cid, title, content, author_name, pending_approval, removed, deleted
+           FROM comments WHERE takedown = 1`,
+      )
+      .all() as Pick<
+      Comment,
+      'cid' | 'post_cid' | 'title' | 'content' | 'author_name' | 'pending_approval' | 'removed' | 'deleted'
+    >[];
+    for (const row of taken) {
+      if (blockedBy(row.cid, row.post_cid)) continue;
+      restore.run(row.cid);
+      // Back into search — unless the row is a tombstone for other reasons.
+      if (!row.pending_approval && !row.removed && !row.deleted) {
+        deleteFts.run(row.cid); // defensive: never double-index
+        insertFts.run({ cid: row.cid, title: row.title, content: row.content, author_name: row.author_name });
+      }
+    }
+
+    // Redact everything the blocklist matches (idempotent on re-application).
+    for (const e of entries) {
+      const targets = database
+        .prepare(
+          e.scope === 'thread'
+            ? 'SELECT cid FROM comments WHERE cid = @cid OR post_cid = @cid'
+            : 'SELECT cid FROM comments WHERE cid = @cid',
+        )
+        .all({ cid: e.cid }) as { cid: string }[];
+      for (const t of targets) {
+        redact.run({ cid: t.cid, reason: e.reason });
+        deleteFts.run(t.cid);
+      }
+    }
+  })();
 }
 
 // ── search ───────────────────────────────────────────────────────────────────
@@ -354,25 +440,29 @@ export interface CommentInput {
  *   flags an already-indexed comment as pending, the row is kept but stops
  *   being served (and leaves the FTS index).
  * - removed/deleted comments stay as rows (tombstones) but leave the FTS index.
+ * - blocklisted CIDs (operator takedown) are marked on insert and never enter
+ *   the FTS index — re-crawling cannot resurrect a takedown.
  *
  * Returns the number of newly inserted comments.
  */
 export function insertComments(rows: CommentInput[]): number {
   const database = getDb();
   const selectPrior = database.prepare(
-    'SELECT pending_approval, removed, deleted FROM comments WHERE cid = ?',
+    'SELECT pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
   );
   const insert = database.prepare(
     `INSERT INTO comments
        (cid, community_address, post_cid, parent_cid, depth, timestamp,
         author_address, author_name, title, content, link, thumbnail_url,
         upvote_count, downvote_count, reply_count, raw, indexed_at, removed_at,
-        first_seen_at, last_seen_at, pending_approval, removed, deleted, mod_reason, upstream_archived)
+        first_seen_at, last_seen_at, pending_approval, removed, deleted, mod_reason, upstream_archived,
+        takedown, takedown_reason)
      VALUES
        (@cid, @community_address, @post_cid, @parent_cid, @depth, @timestamp,
         @author_address, @author_name, @title, @content, @link, @thumbnail_url,
         @upvote_count, @downvote_count, @reply_count, @raw, @indexed_at, @removed_at,
-        @first_seen_at, @last_seen_at, 0, @removed, @deleted, @mod_reason, @upstream_archived)`,
+        @first_seen_at, @last_seen_at, 0, @removed, @deleted, @mod_reason, @upstream_archived,
+        @takedown, @takedown_reason)`,
   );
   const update = database.prepare(
     `UPDATE comments SET
@@ -437,8 +527,9 @@ export function insertComments(rows: CommentInput[]): number {
       };
 
       const prior = selectPrior.get(r.cid) as
-        | { pending_approval: number; removed: number; deleted: number }
+        | { pending_approval: number; removed: number; deleted: number; takedown: number }
         | undefined;
+      const blocked = blockedBy(r.cid, row.post_cid);
 
       if (!prior) {
         // Mod-queue content is never indexed. When it's later approved and
@@ -449,8 +540,10 @@ export function insertComments(rows: CommentInput[]): number {
           indexed_at: r.indexed_at ?? now,
           first_seen_at: r.first_seen_at ?? seenAt,
           removed_at: removed || deleted ? now : null,
+          takedown: blocked ? 1 : 0,
+          takedown_reason: blocked?.reason ?? null,
         });
-        if (!removed && !deleted) {
+        if (!removed && !deleted && !blocked) {
           insertFts.run({ cid: row.cid, title: row.title, content: row.content, author_name: row.author_name });
         }
         inserted++;
@@ -458,8 +551,8 @@ export function insertComments(rows: CommentInput[]): number {
       }
 
       update.run(row);
-      const wasServable = !prior.pending_approval && !prior.removed && !prior.deleted;
-      const isServable = !pending && !removed && !deleted;
+      const wasServable = !prior.pending_approval && !prior.removed && !prior.deleted && !prior.takedown;
+      const isServable = !pending && !removed && !deleted && !blocked && !prior.takedown;
       if (wasServable && !isServable) {
         deleteFts.run(r.cid);
       } else if (!wasServable && isServable) {
@@ -481,7 +574,7 @@ export interface Stats {
 }
 
 export function stats(): Stats {
-  const visible = 'pending_approval = 0 AND removed = 0 AND deleted = 0';
+  const visible = 'pending_approval = 0 AND removed = 0 AND deleted = 0 AND takedown = 0';
   return {
     communities: one<{ n: number }>('SELECT COUNT(*) AS n FROM communities')?.n ?? 0,
     posts: one<{ n: number }>(`SELECT COUNT(*) AS n FROM comments WHERE depth = 0 AND ${visible}`)?.n ?? 0,

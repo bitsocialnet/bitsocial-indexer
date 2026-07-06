@@ -21,6 +21,12 @@ export const config = {
 
   crawlIntervalMs: Number(process.env.CRAWL_INTERVAL_MS ?? 60_000),
 
+  /**
+   * Operator takedown blocklist: path to a JSON file of CIDs that must not be
+   * served (DMCA, illegal content). Empty = no blocklist. See src/blocklist.ts.
+   */
+  blocklistSource: process.env.BLOCKLIST_SOURCE ?? '',
+
   /** Pagination bounds per crawl pass (keeps a single tick bounded). */
   crawlMaxPages: Number(process.env.CRAWL_MAX_PAGES ?? 20),
   crawlMaxReplyDepth: Number(process.env.CRAWL_MAX_REPLY_DEPTH ?? 6),

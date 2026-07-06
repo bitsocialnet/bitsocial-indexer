@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { getThread, insertComments, listPosts, searchPosts, stats, upsertCommunity } = await import('./index.js');
+const { getThread, insertComments, listPosts, searchPosts, setBlocklist, stats, upsertCommunity } = await import('./index.js');
 type CommentInput = import('./index.js').CommentInput;
 
 const COMMUNITY = 'test.bso';
@@ -140,6 +140,111 @@ test('re-crawls refresh counters and last_seen_at but never blank archived conte
   assert.equal(post?.upvote_count, 7);
   assert.equal(post?.reply_count, 3);
   assert.equal(post?.last_seen_at, now);
+});
+
+test('blocklist (comment scope) redacts a takedown tombstone and drops it from search', () => {
+  const op = makeComment({ cid: 'bl-op', content: 'infringing narwhal' });
+  const reply = makeComment({
+    cid: 'bl-reply',
+    post_cid: 'bl-op',
+    parent_cid: 'bl-op',
+    depth: 1,
+    title: null,
+    content: 'innocent bystander reply',
+  });
+  assert.equal(insertComments([op, reply]), 2);
+  assert.equal(searchPosts({ q: 'narwhal' }).total, 1);
+
+  setBlocklist([{ cid: 'bl-op', scope: 'comment', reason: 'DMCA #42' }]);
+  const thread = getThread('bl-op');
+  assert.ok(thread, 'blocked OP is still fetchable as a tombstone');
+  assert.equal(thread.post.takedown, 1);
+  assert.equal(thread.post.takedown_reason, 'DMCA #42');
+  assert.equal(thread.post.title, null);
+  assert.equal(thread.post.content, null);
+  assert.equal(thread.post.author_address, null);
+  assert.equal(thread.post.author_name, null);
+  assert.equal(thread.post.raw, null);
+  // Comment scope leaves the rest of the thread alone.
+  const rep = thread.replies.find((r) => r.cid === 'bl-reply');
+  assert.equal(rep?.takedown, 0);
+  assert.equal(rep?.content, 'innocent bystander reply');
+  assert.equal(searchPosts({ q: 'narwhal' }).total, 0);
+  assert.equal(listPosts({ community: COMMUNITY }).posts.some((p) => p.cid === 'bl-op'), false);
+  setBlocklist([]);
+});
+
+test('blocklist (thread scope) redacts the post and every reply', () => {
+  insertComments([
+    makeComment({ cid: 'blt-op', content: 'whole thread ocelot' }),
+    makeComment({
+      cid: 'blt-r1',
+      post_cid: 'blt-op',
+      parent_cid: 'blt-op',
+      depth: 1,
+      title: null,
+      content: 'reply ocelot one',
+    }),
+  ]);
+  setBlocklist([{ cid: 'blt-op', scope: 'thread', reason: 'court order' }]);
+
+  const thread = getThread('blt-op');
+  assert.ok(thread);
+  assert.equal(thread.post.takedown, 1);
+  const r1 = thread.replies.find((r) => r.cid === 'blt-r1');
+  assert.equal(r1?.takedown, 1);
+  assert.equal(r1?.takedown_reason, 'court order');
+  assert.equal(r1?.content, null);
+  assert.equal(searchPosts({ q: 'ocelot', includeReplies: true }).total, 0);
+});
+
+test('re-crawling a blocklisted thread does not resurrect it', () => {
+  // Upstream upsert of the blocked OP…
+  insertComments([makeComment({ cid: 'blt-op', content: 'whole thread ocelot', upvote_count: 9 })]);
+  // …and a brand-new reply crawled into the blocked thread.
+  insertComments([
+    makeComment({
+      cid: 'blt-r2',
+      post_cid: 'blt-op',
+      parent_cid: 'blt-op',
+      depth: 1,
+      title: null,
+      content: 'late reply ocelot',
+    }),
+  ]);
+
+  const thread = getThread('blt-op');
+  assert.ok(thread);
+  assert.equal(thread.post.takedown, 1);
+  assert.equal(thread.post.content, null);
+  const r2 = thread.replies.find((r) => r.cid === 'blt-r2');
+  assert.equal(r2?.takedown, 1, 'new reply in a blocked thread is born redacted');
+  assert.equal(r2?.content, null);
+  assert.equal(searchPosts({ q: 'ocelot', includeReplies: true }).total, 0);
+});
+
+test('removing a blocklist entry restores content, listings, and search', () => {
+  setBlocklist([]);
+  const thread = getThread('blt-op');
+  assert.ok(thread);
+  assert.equal(thread.post.takedown, 0);
+  assert.equal(thread.post.takedown_reason, null);
+  assert.equal(thread.post.content, 'whole thread ocelot');
+  assert.equal(thread.post.upvote_count, 9, 're-crawl updates applied while blocked survive');
+  const r2 = thread.replies.find((r) => r.cid === 'blt-r2');
+  assert.equal(r2?.content, 'late reply ocelot');
+  assert.equal(searchPosts({ q: 'ocelot', includeReplies: true }).total, 3, 'FTS re-indexed on unblock');
+  assert.equal(listPosts({ community: COMMUNITY }).posts.some((p) => p.cid === 'blt-op'), true);
+});
+
+test('unblocking a comment that is also mod-removed keeps it a tombstone', () => {
+  insertComments([makeComment({ cid: 'bl-removed', content: 'double jeopardy ibex' })]);
+  insertComments([makeComment({ cid: 'bl-removed', removed: true })]);
+  setBlocklist([{ cid: 'bl-removed', scope: 'comment', reason: null }]);
+  setBlocklist([]);
+  assert.equal(getThread('bl-removed')?.post.removed, 1);
+  assert.equal(getThread('bl-removed')?.post.content, null);
+  assert.equal(searchPosts({ q: 'ibex' }).total, 0, 'unblock never re-indexes removed content');
 });
 
 test('stats count only servable comments', () => {

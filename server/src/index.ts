@@ -1,10 +1,12 @@
 import { buildServer } from './api/server.js';
+import { startBlocklist, stopBlocklist } from './blocklist.js';
 import { config } from './config.js';
 import { startCrawler, stopCrawler } from './crawler/crawler.js';
 import { getDb } from './db/index.js';
 
 async function main(): Promise<void> {
   getDb(); // initialise schema
+  await startBlocklist(); // apply operator takedowns before serving anything
 
   if (config.seedDemo) {
     const { seedDemo } = await import('./db/seed.js');
@@ -19,6 +21,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     stopCrawler();
+    stopBlocklist();
     await app.close();
     process.exit(0);
   };

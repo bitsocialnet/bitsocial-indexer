@@ -40,7 +40,12 @@ CREATE TABLE IF NOT EXISTS comments (
   removed           INTEGER NOT NULL DEFAULT 0, -- mod-removed
   deleted           INTEGER NOT NULL DEFAULT 0, -- author-deleted
   mod_reason        TEXT,
-  upstream_archived INTEGER NOT NULL DEFAULT 0  -- explicit `archived` flag in a CommentUpdate
+  upstream_archived INTEGER NOT NULL DEFAULT 0, -- explicit `archived` flag in a CommentUpdate
+  -- Operator takedown (local blocklist, see BLOCKLIST_SOURCE). Reversible
+  -- serve-time redaction: content columns are never destroyed, only this flag
+  -- (plus FTS membership) toggles.
+  takedown          INTEGER NOT NULL DEFAULT 0,
+  takedown_reason   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_community ON comments(community_address);
