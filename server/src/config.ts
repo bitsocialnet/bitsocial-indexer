@@ -30,7 +30,12 @@ export const config = {
 
   siteName: process.env.SITE_NAME ?? 'Bitsocial Indexer',
   siteUrl: process.env.SITE_URL ?? 'http://localhost:4000',
-  corsOrigin: process.env.CORS_ORIGIN ?? '*',
+
+  /**
+   * CORS allow-list, comma-separated ("*" = any origin — fine for a public
+   * read-only API). CORS_ORIGIN is the legacy name, kept as a fallback.
+   */
+  allowedOrigins: process.env.ALLOWED_ORIGINS ?? process.env.CORS_ORIGIN ?? '*',
 } as const;
 
 /** True when the operator has configured something to index. */

@@ -13,7 +13,8 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   await app.register(cors, {
-    origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',').map((s) => s.trim()),
+    origin: config.allowedOrigins === '*' ? true : config.allowedOrigins.split(',').map((s) => s.trim()).filter(Boolean),
+    methods: ['GET', 'HEAD'], // read-only API
   });
 
   await app.register(health);
