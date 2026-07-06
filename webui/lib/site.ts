@@ -16,3 +16,9 @@ export const theme = process.env.THEME === '5chan' ? '5chan' : 'default';
  */
 export const brandText = process.env.BRAND_TEXT ?? '';
 export const brandUrl = process.env.BRAND_URL ?? '';
+
+/**
+ * Contact address for content-removal / takedown requests, shown on /legal.
+ * Unset = the page says requests are handled by the instance operator.
+ */
+export const contactEmail = process.env.CONTACT_EMAIL ?? '';

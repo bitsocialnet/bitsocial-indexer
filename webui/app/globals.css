@@ -164,6 +164,11 @@ main.container { flex: 1; padding-top: 2.25rem; padding-bottom: 4rem; }
 .tombstone { color: var(--muted); font-style: italic; }
 .reply-tombstone { border-left-color: var(--border); }
 
+/* ── legal ── */
+.legal { max-width: 44rem; }
+.legal section p { margin: 0 0 1.75rem; }
+.legal section a { color: var(--accent); text-decoration: underline; }
+
 /* ── footer ── */
 .site-footer { border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
 .site-footer .container { padding-top: 1.5rem; padding-bottom: 2.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; justify-content: space-between; }
@@ -235,6 +240,8 @@ html[data-theme='5chan'] .prose { color: maroon; }
 html[data-theme='5chan'] .reply { padding: 0.55rem 0.8rem; margin-bottom: 0.3rem; border-left: 1px solid var(--border); }
 html[data-theme='5chan'] .reply .meta > span:first-child { color: #117743; font-weight: 700; }
 html[data-theme='5chan'] .notice { border-left-color: var(--accent); color: maroon; }
+html[data-theme='5chan'] .legal section a { color: #00e; }
+html[data-theme='5chan'] .legal section a:hover { color: red; }
 html[data-theme='5chan'] .flag-archived { background: #fca; }
 
 html[data-theme='5chan'] .site-footer { background: #fed; border-top: 1px solid var(--border); color: var(--accent); }

@@ -99,7 +99,9 @@ and the stored content is served again (the redaction never destroys the
 archived data). Blocklisted comments leave listings and search but stay in
 threads as redacted tombstones, marked `takedown: 1` (plus the optional
 `takedown_reason`) on the API so UIs can distinguish them from upstream
-moderation, and they stay redacted across re-crawls.
+moderation, and they stay redacted across re-crawls. The bundled web UI shows
+them as `[removed — takedown request]` and documents the policy on its
+`/legal` page (see `CONTACT_EMAIL` below).
 
 ### `webui/`
 
@@ -112,6 +114,7 @@ moderation, and they stay redacted across re-crawls.
 | `THEME` | `default` | UI skin: `default` (Bitsocial dark) or `5chan` (classic imageboard look) |
 | `BRAND_TEXT` | _(empty)_ | Optional footer attribution line, e.g. `A Bitsocial Forge product`. Unset = nothing rendered |
 | `BRAND_URL` | _(empty)_ | Makes `BRAND_TEXT` a link |
+| `CONTACT_EMAIL` | _(empty)_ | Contact address for content-removal / takedown requests, shown on the `/legal` archive-policy page. Unset = the page says requests are handled by the instance operator |
 
 The web UI serves its own `robots.txt` and a `sitemap.xml` **sitemap index**
 (one child sitemap per community, capped at the 5,000 most recent posts each,

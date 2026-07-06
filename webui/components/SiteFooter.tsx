@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { brandText, brandUrl } from '@/lib/site';
 
 export function SiteFooter() {
@@ -15,7 +16,7 @@ export function SiteFooter() {
           </span>
         ) : null}
         <span>
-          Open source ·{' '}
+          <Link href="/legal">Legal</Link> · Open source ·{' '}
           <a href="https://github.com/bitsocialnet/bitsocial-indexer">GPL-3.0-or-later</a>
         </span>
       </div>
