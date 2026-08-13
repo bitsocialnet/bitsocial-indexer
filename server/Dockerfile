@@ -6,8 +6,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+# The lockfile makes production builds reproducible. It is generated with
+# legacy peer resolution because React Native is only a peer of a browser/
+# WebRTC dependency and is not used by this Node-only RPC client; installing it
+# would ship Metro and an unused parser surface in the API image.
+RUN npm ci --legacy-peer-deps
 
 COPY . .
 
