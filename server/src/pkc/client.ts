@@ -18,6 +18,23 @@ export interface PkcClient {
 
 let clientPromise: Promise<PkcClient> | null = null;
 
+/**
+ * Keep credentials and opaque path segments out of logs. PKC RPC uses the
+ * first URL path segment as the remote authentication key, and URLs may also
+ * carry userinfo or query credentials.
+ */
+export function formatPkcRpcUrlForLog(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') return '[invalid PKC RPC URL]';
+
+    const hasOpaquePath = url.pathname !== '' && url.pathname !== '/';
+    return `${url.protocol}//${url.host}${hasOpaquePath ? '/[redacted]' : ''}`;
+  } catch {
+    return '[invalid PKC RPC URL]';
+  }
+}
+
 export function getPkcClient(): Promise<PkcClient> {
   clientPromise ??= connect();
   return clientPromise;
@@ -33,7 +50,7 @@ async function connect(): Promise<PkcClient> {
 
   const pkc = await PKC({ pkcRpcClientsOptions: [config.pkcRpcUrl] });
   pkc.on?.('error', (err: unknown) => console.error('[pkc] error event:', err));
-  console.log(`[pkc] connected via ${config.pkcRpcUrl}`);
+  console.log(`[pkc] connected via ${formatPkcRpcUrlForLog(config.pkcRpcUrl)}`);
 
   return {
     getCommunity: (address) => pkc.getCommunity({ address }),
