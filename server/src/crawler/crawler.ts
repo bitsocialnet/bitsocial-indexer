@@ -98,7 +98,10 @@ export function mapComment(c: any, communityAddress: string, seenAt = nowSec()):
   const update = c.raw?.commentUpdate ?? {};
   return {
     cid: c.cid,
-    community_address: c.communityAddress ?? communityAddress,
+    // Group by the address the operator configured, not a legacy address
+    // embedded in the signed publication. A canonical `.bso` directory may
+    // resolve publications originally signed for its old `.eth` alias.
+    community_address: communityAddress,
     post_cid: c.postCid ?? c.cid,
     parent_cid: c.parentCid ?? null,
     depth: typeof c.depth === 'number' ? c.depth : c.parentCid ? 1 : 0,

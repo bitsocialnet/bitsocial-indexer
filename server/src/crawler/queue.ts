@@ -27,7 +27,8 @@ export function enqueue(address: string): void {
     .prepare(
       `INSERT INTO crawl_queue (community_address, status, next_run_at)
        VALUES (@address, 'queued', @now)
-       ON CONFLICT(community_address) DO NOTHING`,
+       ON CONFLICT(community_address) DO UPDATE SET
+         next_run_at = MIN(COALESCE(crawl_queue.next_run_at, excluded.next_run_at), excluded.next_run_at)`,
     )
     .run({ address, now: nowSec() });
 }

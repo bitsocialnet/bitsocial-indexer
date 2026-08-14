@@ -52,6 +52,11 @@ test('mapComment returns null without a cid', () => {
   assert.equal(mapComment({}, ADDRESS), null);
 });
 
+test('mapComment groups legacy publications under the configured canonical address', () => {
+  const row = mapComment({ cid: 'legacy-1', communityAddress: 'test.eth', timestamp: 1 }, ADDRESS);
+  assert.equal(row?.community_address, ADDRESS);
+});
+
 test('runWithConcurrency processes every item without exceeding its worker cap', async () => {
   let active = 0;
   let peak = 0;

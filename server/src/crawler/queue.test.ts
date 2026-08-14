@@ -77,3 +77,12 @@ test('a success still due in the future is not re-crawled', () => {
   markSuccess('a.bso', nowSec() + 3600);
   assert.deepEqual(addresses(), []);
 });
+
+test('enqueue pulls an existing future schedule forward for an immediate startup refresh', () => {
+  reset();
+  enqueue('a.bso');
+  markSuccess('a.bso', nowSec() + 3600);
+  assert.deepEqual(addresses(), []);
+  enqueue('a.bso');
+  assert.deepEqual(addresses(), ['a.bso']);
+});

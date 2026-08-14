@@ -475,6 +475,7 @@ export function insertComments(rows: CommentInput[]): number {
   );
   const update = database.prepare(
     `UPDATE comments SET
+        community_address = @community_address,
         upvote_count = @upvote_count,
         downvote_count = @downvote_count,
         reply_count = @reply_count,
