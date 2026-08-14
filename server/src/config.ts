@@ -31,6 +31,13 @@ export const config = {
   crawlMaxPages: Number(process.env.CRAWL_MAX_PAGES ?? 20),
   crawlMaxReplyDepth: Number(process.env.CRAWL_MAX_REPLY_DEPTH ?? 6),
 
+  /**
+   * Hard cap on one community's crawl pass. The PKC calls a pass makes can hang
+   * indefinitely (a daemon that accepts the socket but never answers), which
+   * would stall every community queued behind it.
+   */
+  crawlTimeoutMs: Number(process.env.CRAWL_TIMEOUT_MS ?? 300_000),
+
   /** Load demo data on boot (same as `npm run seed`). */
   seedDemo: process.env.SEED_DEMO === 'true',
 

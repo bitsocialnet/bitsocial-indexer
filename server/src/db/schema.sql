@@ -69,5 +69,6 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
   attempts          INTEGER NOT NULL DEFAULT 0,
   last_success_at   INTEGER,
   last_error        TEXT,
-  next_run_at       INTEGER
+  next_run_at       INTEGER,
+  started_at        INTEGER                          -- when the current 'running' pass claimed the row
 );
