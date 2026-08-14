@@ -21,6 +21,9 @@ export const config = {
 
   crawlIntervalMs: Number(process.env.CRAWL_INTERVAL_MS ?? 60_000),
 
+  /** Maximum communities crawled at once. */
+  crawlConcurrency: Number(process.env.CRAWL_CONCURRENCY ?? 4),
+
   /**
    * Operator takedown blocklist: path to a JSON file of CIDs that must not be
    * served (DMCA, illegal content). Empty = no blocklist. See src/blocklist.ts.

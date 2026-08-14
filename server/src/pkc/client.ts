@@ -17,6 +17,7 @@ export interface PkcClient {
 }
 
 let clientPromise: Promise<PkcClient> | null = null;
+let resetPromise: Promise<void> | null = null;
 
 /**
  * Identifies the cached client. Bumped on every connect, so a doomed client's
@@ -66,6 +67,27 @@ export function getPkcClient(): Promise<PkcClient> {
     });
   }
   return clientPromise;
+}
+
+/**
+ * Retire and close the current RPC client after a timed-out call. Clearing the
+ * cache first lets new work reconnect immediately; the generation guard keeps
+ * the old client's late teardown from evicting that replacement.
+ */
+export function resetPkcClient(): Promise<void> {
+  if (resetPromise) return resetPromise;
+
+  const doomed = clientPromise;
+  clientPromise = null;
+  if (!doomed) return Promise.resolve();
+
+  resetPromise = doomed
+    .then((client) => client.destroy())
+    .catch(() => {})
+    .finally(() => {
+      resetPromise = null;
+    });
+  return resetPromise;
 }
 
 async function connect(gen: number): Promise<PkcClient> {

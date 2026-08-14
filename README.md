@@ -79,6 +79,9 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 | `COMMUNITIES_SOURCE` | _(empty)_ | URL/path to a JSON list of community addresses (e.g. a client's directory). Overrides/augments `COMMUNITIES`. |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
+| `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
+| `CRAWL_CONCURRENCY` | `4` | Maximum communities crawled at once |
+| `CRAWL_TIMEOUT_MS` | `300000` | Hard timeout for one community crawl; a timeout resets the RPC client |
 | `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). `CORS_ORIGIN` is accepted as a legacy fallback. |
 | `BLOCKLIST_SOURCE` | _(empty)_ | Path to a JSON file of CIDs to take down (operator blocklist, see below). |
 
