@@ -4,6 +4,14 @@ function list(v: string | undefined): string[] {
   return (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+export function positiveDuration(value: string | undefined, fallback: number, name: string): number {
+  const duration = Number(value ?? fallback);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error(`${name} must be a finite positive number of milliseconds`);
+  }
+  return duration;
+}
+
 /** Runtime configuration, all sourced from environment variables. */
 export const config = {
   port: Number(process.env.PORT ?? 4000),
@@ -21,6 +29,9 @@ export const config = {
 
   crawlIntervalMs: Number(process.env.CRAWL_INTERVAL_MS ?? 60_000),
 
+  /** Maximum communities crawled at once. */
+  crawlConcurrency: Number(process.env.CRAWL_CONCURRENCY ?? 4),
+
   /**
    * Operator takedown blocklist: path to a JSON file of CIDs that must not be
    * served (DMCA, illegal content). Empty = no blocklist. See src/blocklist.ts.
@@ -30,6 +41,13 @@ export const config = {
   /** Pagination bounds per crawl pass (keeps a single tick bounded). */
   crawlMaxPages: Number(process.env.CRAWL_MAX_PAGES ?? 20),
   crawlMaxReplyDepth: Number(process.env.CRAWL_MAX_REPLY_DEPTH ?? 6),
+
+  /**
+   * Hard cap on one community's crawl pass. The PKC calls a pass makes can hang
+   * indefinitely (a daemon that accepts the socket but never answers), which
+   * would stall every community queued behind it.
+   */
+  crawlTimeoutMs: positiveDuration(process.env.CRAWL_TIMEOUT_MS, 300_000, 'CRAWL_TIMEOUT_MS'),
 
   /** Load demo data on boot (same as `npm run seed`). */
   seedDemo: process.env.SEED_DEMO === 'true',

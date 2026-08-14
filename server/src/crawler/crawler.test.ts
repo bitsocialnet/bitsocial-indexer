@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { mapComment } = await import('./crawler.js');
+const { CrawlTimeoutError, mapComment, runWithConcurrency, withTimeout } = await import('./crawler.js');
 
 const ADDRESS = 'test.bso';
 
@@ -50,4 +50,47 @@ test('mapComment picks up the upstream archived flag', () => {
 
 test('mapComment returns null without a cid', () => {
   assert.equal(mapComment({}, ADDRESS), null);
+});
+
+test('mapComment groups legacy publications under the configured canonical address', () => {
+  const row = mapComment({ cid: 'legacy-1', communityAddress: 'test.eth', timestamp: 1 }, ADDRESS);
+  assert.equal(row?.community_address, ADDRESS);
+});
+
+test('runWithConcurrency processes every item without exceeding its worker cap', async () => {
+  let active = 0;
+  let peak = 0;
+  const completed: number[] = [];
+
+  await runWithConcurrency([1, 2, 3, 4, 5, 6], 3, async (item) => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    completed.push(item);
+    active--;
+  });
+
+  assert.equal(peak, 3);
+  assert.deepEqual(completed.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
+});
+
+test('runWithConcurrency clamps invalid limits to one worker', async () => {
+  let active = 0;
+  let peak = 0;
+
+  await runWithConcurrency([1, 2], 0, async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active--;
+  });
+
+  assert.equal(peak, 1);
+});
+
+test('withTimeout rejects a hung crawl with a typed timeout error', async () => {
+  await assert.rejects(
+    withTimeout(new Promise<never>(() => {}), 5, 'test.bso crawl'),
+    (err) => err instanceof CrawlTimeoutError && err.message === 'test.bso crawl exceeded 5ms',
+  );
 });

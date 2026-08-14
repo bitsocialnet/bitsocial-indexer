@@ -7,10 +7,44 @@
  */
 import { config, hasConfiguredCommunities } from '../config.js';
 import { insertComments, upsertCommunity, type CommentInput } from '../db/index.js';
-import { getPkcClient } from '../pkc/client.js';
-import { due, enqueue, markFailed, markRunning, markSuccess } from './queue.js';
+import { getPkcClient, resetPkcClient } from '../pkc/client.js';
+import { due, enqueue, markFailed, markRunning, markSuccess, reclaimAbandoned } from './queue.js';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
+
+/**
+ * Reject if `promise` has not settled within `ms`. The PKC calls a crawl pass
+ * makes have no bound of their own; one that never settles would otherwise hold
+ * its queue lease and block every community behind it in the pass.
+ */
+export class CrawlTimeoutError extends Error {}
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new CrawlTimeoutError(`${label} exceeded ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** Run every item with a fixed worker pool, preserving a hard concurrency cap. */
+export async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  const limit = Math.max(1, Math.min(items.length, Math.floor(concurrency) || 1));
+  let next = 0;
+
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      while (next < items.length) {
+        const item = items[next++]!;
+        await worker(item);
+      }
+    }),
+  );
+}
 
 /** Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list. */
 export async function resolveCommunities(): Promise<string[]> {
@@ -64,7 +98,10 @@ export function mapComment(c: any, communityAddress: string, seenAt = nowSec()):
   const update = c.raw?.commentUpdate ?? {};
   return {
     cid: c.cid,
-    community_address: c.communityAddress ?? communityAddress,
+    // Group by the address the operator configured, not a legacy address
+    // embedded in the signed publication. A canonical `.bso` directory may
+    // resolve publications originally signed for its old `.eth` alias.
+    community_address: communityAddress,
     post_cid: c.postCid ?? c.cid,
     parent_cid: c.parentCid ?? null,
     depth: typeof c.depth === 'number' ? c.depth : c.parentCid ? 1 : 0,
@@ -160,19 +197,34 @@ async function indexCommunity(address: string): Promise<number> {
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
+let ticking = false;
+
 async function tick(): Promise<void> {
-  for (const row of due()) {
-    const { community_address: address } = row;
-    markRunning(address);
-    try {
-      const n = await indexCommunity(address);
-      markSuccess(address, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
-      if (n) console.log(`[crawler] ${address}: indexed ${n} new comments`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[crawler] ${address}: ${message}`);
-      markFailed(address, message, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
-    }
+  // A pass slower than the interval must not run alongside the next one: the
+  // two would compete for the same due rows.
+  if (ticking) return;
+  ticking = true;
+  try {
+    await runWithConcurrency(due(), config.crawlConcurrency, async (row) => {
+      const { community_address: address } = row;
+      markRunning(address);
+      try {
+        const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
+        markSuccess(address, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
+        if (n) console.log(`[crawler] ${address}: indexed ${n} new comments`);
+      } catch (err) {
+        if (err instanceof CrawlTimeoutError) {
+          // A hung RPC promise cannot be cancelled directly. Retiring its
+          // transport rejects the orphan and gives subsequent work a new one.
+          void resetPkcClient();
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[crawler] ${address}: ${message}`);
+        markFailed(address, message, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
+      }
+    });
+  } finally {
+    ticking = false;
   }
 }
 
@@ -189,6 +241,11 @@ export async function startCrawler(): Promise<void> {
     upsertCommunity({ address, added_at: nowSec() });
     enqueue(address);
   }
+  const reclaimed = reclaimAbandoned();
+  if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
+  console.log(
+    `[crawler] refresh target ${config.crawlIntervalMs}ms, concurrency ${config.crawlConcurrency}, timeout ${config.crawlTimeoutMs}ms`,
+  );
   await tick();
   timer = setInterval(() => void tick(), config.crawlIntervalMs);
 }

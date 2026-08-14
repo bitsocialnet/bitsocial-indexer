@@ -112,7 +112,7 @@ export function getDb(): Database.Database {
 
 /** Additive migrations for databases created before a column existed in schema.sql. */
 function migrate(database: Database.Database): void {
-  const columns: Record<string, string> = {
+  const added = addColumns(database, 'comments', {
     first_seen_at: 'INTEGER',
     last_seen_at: 'INTEGER',
     pending_approval: 'INTEGER NOT NULL DEFAULT 0',
@@ -122,19 +122,28 @@ function migrate(database: Database.Database): void {
     upstream_archived: 'INTEGER NOT NULL DEFAULT 0',
     takedown: 'INTEGER NOT NULL DEFAULT 0',
     takedown_reason: 'TEXT',
-  };
-  const existing = new Set((database.pragma(`table_info('comments')`) as { name: string }[]).map((c) => c.name));
-  let added = false;
-  for (const [name, type] of Object.entries(columns)) {
-    if (existing.has(name)) continue;
-    database.exec(`ALTER TABLE comments ADD COLUMN ${name} ${type}`);
-    added = true;
-  }
+  });
   if (added) {
     // Backfill seen-times for rows indexed before the columns existed.
     database.exec('UPDATE comments SET first_seen_at = indexed_at WHERE first_seen_at IS NULL');
     database.exec('UPDATE comments SET last_seen_at = indexed_at WHERE last_seen_at IS NULL');
   }
+  // Crawl leases (see crawler/queue.ts). A pre-existing 'running' row has no
+  // start time, so it reads as abandoned — which is exactly right: it was
+  // claimed by a process that is long gone.
+  addColumns(database, 'crawl_queue', { started_at: 'INTEGER' });
+}
+
+/** Add every missing column to `table`. Returns true when it changed anything. */
+function addColumns(database: Database.Database, table: string, columns: Record<string, string>): boolean {
+  const existing = new Set((database.pragma(`table_info('${table}')`) as { name: string }[]).map((c) => c.name));
+  let added = false;
+  for (const [name, type] of Object.entries(columns)) {
+    if (existing.has(name)) continue;
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    added = true;
+  }
+  return added;
 }
 
 function all<T>(sql: string, params: Record<string, unknown> = {}): T[] {
@@ -448,7 +457,10 @@ export interface CommentInput {
 export function insertComments(rows: CommentInput[]): number {
   const database = getDb();
   const selectPrior = database.prepare(
-    'SELECT pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+    'SELECT community_address, pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+  );
+  const moveCommunityArchive = database.prepare(
+    'UPDATE comments SET community_address = @next WHERE community_address = @prior',
   );
   const insert = database.prepare(
     `INSERT INTO comments
@@ -466,6 +478,7 @@ export function insertComments(rows: CommentInput[]): number {
   );
   const update = database.prepare(
     `UPDATE comments SET
+        community_address = @community_address,
         upvote_count = @upvote_count,
         downvote_count = @downvote_count,
         reply_count = @reply_count,
@@ -527,8 +540,13 @@ export function insertComments(rows: CommentInput[]): number {
       };
 
       const prior = selectPrior.get(r.cid) as
-        | { pending_approval: number; removed: number; deleted: number; takedown: number }
+        | { community_address: string; pending_approval: number; removed: number; deleted: number; takedown: number }
         | undefined;
+      if (prior && prior.community_address !== r.community_address) {
+        // Seeing any still-live row through a canonical alias proves that the
+        // complete archive under its previous address belongs here too.
+        moveCommunityArchive.run({ prior: prior.community_address, next: r.community_address });
+      }
       const blocked = blockedBy(r.cid, row.post_cid);
 
       if (!prior) {
