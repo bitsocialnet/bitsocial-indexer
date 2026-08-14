@@ -457,7 +457,10 @@ export interface CommentInput {
 export function insertComments(rows: CommentInput[]): number {
   const database = getDb();
   const selectPrior = database.prepare(
-    'SELECT pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+    'SELECT community_address, pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+  );
+  const moveCommunityArchive = database.prepare(
+    'UPDATE comments SET community_address = @next WHERE community_address = @prior',
   );
   const insert = database.prepare(
     `INSERT INTO comments
@@ -537,8 +540,13 @@ export function insertComments(rows: CommentInput[]): number {
       };
 
       const prior = selectPrior.get(r.cid) as
-        | { pending_approval: number; removed: number; deleted: number; takedown: number }
+        | { community_address: string; pending_approval: number; removed: number; deleted: number; takedown: number }
         | undefined;
+      if (prior && prior.community_address !== r.community_address) {
+        // Seeing any still-live row through a canonical alias proves that the
+        // complete archive under its previous address belongs here too.
+        moveCommunityArchive.run({ prior: prior.community_address, next: r.community_address });
+      }
       const blocked = blockedBy(r.cid, row.post_cid);
 
       if (!prior) {

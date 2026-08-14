@@ -144,12 +144,17 @@ test('re-crawls refresh counters and last_seen_at but never blank archived conte
 
 test('re-crawls move legacy-address rows under the configured canonical community', () => {
   const cid = 'op-legacy-community';
-  insertComments([makeComment({ cid, community_address: 'test.eth' })]);
+  const archivedCid = 'op-legacy-community-archived';
+  insertComments([
+    makeComment({ cid, community_address: 'test.eth' }),
+    makeComment({ cid: archivedCid, community_address: 'test.eth' }),
+  ]);
   assert.equal(listPosts({ community: 'test.eth' }).posts.some((p) => p.cid === cid), true);
 
   insertComments([makeComment({ cid, community_address: COMMUNITY })]);
   assert.equal(listPosts({ community: 'test.eth' }).posts.some((p) => p.cid === cid), false);
   assert.equal(listPosts({ community: COMMUNITY }).posts.some((p) => p.cid === cid), true);
+  assert.equal(listPosts({ community: COMMUNITY }).posts.some((p) => p.cid === archivedCid), true);
 });
 
 test('blocklist (comment scope) redacts a takedown tombstone and drops it from search', () => {

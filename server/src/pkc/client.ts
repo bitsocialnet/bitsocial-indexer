@@ -75,19 +75,25 @@ export function getPkcClient(): Promise<PkcClient> {
  * the old client's late teardown from evicting that replacement.
  */
 export function resetPkcClient(): Promise<void> {
-  if (resetPromise) return resetPromise;
-
   const doomed = clientPromise;
   clientPromise = null;
-  if (!doomed) return Promise.resolve();
+  if (!doomed) return resetPromise ?? Promise.resolve();
 
-  resetPromise = doomed
+  const reset = doomed
     .then((client) => client.destroy())
-    .catch(() => {})
-    .finally(() => {
+    .catch(() => {});
+  resetPromise = reset;
+  void reset.finally(() => {
+    if (resetPromise === reset) {
       resetPromise = null;
-    });
-  return resetPromise;
+    }
+  });
+  return reset;
+}
+
+/** Test seam for exercising reset ordering without opening a real RPC socket. */
+export function setPkcClientForTest(client: Promise<PkcClient> | null): void {
+  clientPromise = client;
 }
 
 async function connect(gen: number): Promise<PkcClient> {

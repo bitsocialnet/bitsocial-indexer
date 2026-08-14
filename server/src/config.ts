@@ -4,6 +4,14 @@ function list(v: string | undefined): string[] {
   return (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+export function positiveDuration(value: string | undefined, fallback: number, name: string): number {
+  const duration = Number(value ?? fallback);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error(`${name} must be a finite positive number of milliseconds`);
+  }
+  return duration;
+}
+
 /** Runtime configuration, all sourced from environment variables. */
 export const config = {
   port: Number(process.env.PORT ?? 4000),
@@ -39,7 +47,7 @@ export const config = {
    * indefinitely (a daemon that accepts the socket but never answers), which
    * would stall every community queued behind it.
    */
-  crawlTimeoutMs: Number(process.env.CRAWL_TIMEOUT_MS ?? 300_000),
+  crawlTimeoutMs: positiveDuration(process.env.CRAWL_TIMEOUT_MS, 300_000, 'CRAWL_TIMEOUT_MS'),
 
   /** Load demo data on boot (same as `npm run seed`). */
   seedDemo: process.env.SEED_DEMO === 'true',
