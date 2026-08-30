@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-process.env.ALLOWED_ORIGINS = 'https://5archive.org,https://staging.5archive.org';
-const { buildServer } = await import('./server.js');
-const { insertComments, setBlocklist, upsertCommunity } = await import('../db/index.js');
+process.env.ALLOWED_ORIGINS = 'https://5archive.org,https://staging.5archive.org,https://*.seedit.localhost';
+const { buildServer, parseAllowedOrigins } = await import('./server.js');
+const { insertComments, setBlocklist, setNsfwList, upsertCommunity } = await import('../db/index.js');
 
 const app = await buildServer();
 test.after(() => app.close());
@@ -36,6 +36,45 @@ test('CORS: unlisted origins get no allow-origin header', async () => {
     headers: { origin: 'https://evil.example' },
   });
   assert.equal(res.headers['access-control-allow-origin'], undefined);
+});
+
+test('CORS: a wildcard entry admits every branch-scoped dev origin', async () => {
+  for (const origin of ['https://feat-nsfw.seedit.localhost', 'https://another-branch.seedit.localhost']) {
+    const res = await app.inject({ method: 'GET', url: '/api/health', headers: { origin } });
+    assert.equal(res.headers['access-control-allow-origin'], origin);
+  }
+});
+
+test('CORS: a wildcard entry does not admit look-alike origins', async () => {
+  for (const origin of [
+    'https://seedit.localhost.evil.example', // suffix must still be the end
+    'https://branch.seeditXlocalhost', // the literal dots are escaped
+    'http://branch.seedit.localhost', // scheme is part of the match
+  ]) {
+    const res = await app.inject({ method: 'GET', url: '/api/health', headers: { origin } });
+    assert.equal(res.headers['access-control-allow-origin'], undefined, origin);
+  }
+});
+
+test('parseAllowedOrigins keeps exact entries exact and compiles only wildcards', () => {
+  assert.deepEqual(parseAllowedOrigins('https://5archive.org, https://staging.5archive.org'), [
+    'https://5archive.org',
+    'https://staging.5archive.org',
+  ]);
+  assert.deepEqual(parseAllowedOrigins(''), [], 'an empty allow-list still allows nothing');
+  assert.equal(parseAllowedOrigins('*'), true);
+  assert.equal(parseAllowedOrigins('https://5archive.org,*'), true, '"*" anywhere allows any origin');
+});
+
+test('parseAllowedOrigins anchors the compiled pattern and escapes its literal parts', () => {
+  const [pattern] = parseAllowedOrigins('https://*.seedit.localhost') as RegExp[];
+  assert.ok(pattern instanceof RegExp);
+  assert.equal(pattern.source, '^https:\\/\\/[^/]*\\.seedit\\.localhost$');
+  assert.ok(pattern.test('https://feat-x.seedit.localhost'));
+  assert.ok(pattern.test('https://a.b.seedit.localhost'), 'nested labels still match');
+  assert.equal(pattern.test('https://seeditXlocalhost'), false);
+  assert.equal(pattern.test('https://x.seedit.localhost.evil.example'), false);
+  assert.equal(pattern.test('https://evil.example/x.seedit.localhost'), false, '* cannot swallow a path');
 });
 
 test('API serves removed comments as redacted tombstones', async () => {
@@ -102,6 +141,54 @@ test('API serves blocklisted comments as takedown tombstones, reversibly', async
   assert.equal(restoredBody.post.content, 'copyrighted zebu');
   const search2 = await app.inject({ method: 'GET', url: '/api/search?q=zebu' });
   assert.equal((search2.json() as { total: number }).total, 1);
+});
+
+test('search excludes NSFW by default and includes it on request', async () => {
+  insertComments([
+    {
+      cid: 'api-nsfw',
+      community_address: 'api.bso',
+      post_cid: 'api-nsfw',
+      depth: 0,
+      timestamp: 1,
+      content: 'explicit dugong',
+      nsfw: true,
+    },
+  ]);
+
+  const byDefault = await app.inject({ method: 'GET', url: '/api/search?q=dugong' });
+  assert.equal(byDefault.statusCode, 200);
+  assert.equal((byDefault.json() as { total: number }).total, 0);
+
+  const optedIn = await app.inject({ method: 'GET', url: '/api/search?q=dugong&nsfw=true' });
+  assert.equal((optedIn.json() as { total: number }).total, 1);
+
+  const optedOut = await app.inject({ method: 'GET', url: '/api/search?q=dugong&nsfw=false' });
+  assert.equal((optedOut.json() as { total: number }).total, 0);
+});
+
+test('search rejects a non-boolean nsfw parameter', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/search?q=dugong&nsfw=maybe' });
+  assert.equal(res.statusCode, 400);
+});
+
+test('communities expose the resolved nsfw flag', async () => {
+  upsertCommunity({ address: 'api-adult.bso', last_indexed_at: 1 });
+  upsertCommunity({ address: 'api-sfw.bso', last_indexed_at: 1 });
+  setNsfwList([{ address: 'api-adult.bso', nsfw: true }]);
+
+  const one = await app.inject({ method: 'GET', url: '/api/communities/api-adult.bso' });
+  assert.equal(one.statusCode, 200);
+  assert.equal((one.json() as { nsfw: number }).nsfw, 1);
+
+  const list = await app.inject({ method: 'GET', url: '/api/communities' });
+  const { communities } = list.json() as { communities: { address: string; nsfw: number }[] };
+  assert.equal(communities.find((c) => c.address === 'api-adult.bso')?.nsfw, 1);
+  assert.equal(communities.find((c) => c.address === 'api-sfw.bso')?.nsfw, 0);
+
+  setNsfwList([]);
+  const cleared = await app.inject({ method: 'GET', url: '/api/communities/api-adult.bso' });
+  assert.equal((cleared.json() as { nsfw: number }).nsfw, 0, 'dropping the list entry drops the flag');
 });
 
 test('API never serves pending-approval comments', async () => {

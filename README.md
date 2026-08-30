@@ -82,8 +82,9 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 | `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
 | `CRAWL_CONCURRENCY` | `4` | Maximum communities crawled at once |
 | `CRAWL_TIMEOUT_MS` | `300000` | Hard timeout for one community crawl; a timeout resets the RPC client |
-| `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). `CORS_ORIGIN` is accepted as a legacy fallback. |
+| `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). An entry may contain `*` as a wildcard, e.g. `https://*.seedit.localhost` matches every branch-scoped dev origin. `CORS_ORIGIN` is accepted as a legacy fallback. |
 | `BLOCKLIST_SOURCE` | _(empty)_ | Path to a JSON file of CIDs to take down (operator blocklist, see below). |
+| `NSFW_OVERRIDES_SOURCE` | _(empty)_ | Path to a JSON file of operator NSFW verdicts per community (see below). |
 
 If neither `COMMUNITIES` nor `COMMUNITIES_SOURCE` is set, the crawler stays
 idle and the indexer serves nothing. That is intentional.
@@ -105,6 +106,29 @@ threads as redacted tombstones, marked `takedown: 1` (plus the optional
 moderation, and they stay redacted across re-crawls. The bundled web UI shows
 them as `[removed — takedown request]` and documents the policy on its
 `/legal` page (see `CONTACT_EMAIL` below).
+
+#### NSFW communities (`NSFW_OVERRIDES_SOURCE`)
+
+The protocol has `comment.nsfw` on individual posts but no
+`community.features.nsfw`, so a client cannot ask the network whether a whole
+community is NSFW — the indexer is the place that knows. Each indexed community
+gets an `nsfw` flag on `GET /api/communities` (and `/api/communities/:address`),
+resolved from three signals, **highest precedence first**:
+
+1. **Operator override** — `NSFW_OVERRIDES_SOURCE`, a JSON file where each entry
+   is a bare address or `{ "address": "…", "nsfw": false, "reason": "…" }`.
+   `nsfw` defaults to `true`, and an explicit `false` clears the flag, so a bad
+   inference is correctable. Like the blocklist, the file is re-read whenever it
+   changes — no restart needed.
+2. **The configured community list** — an entry in `COMMUNITIES_SOURCE` may
+   carry its own `nsfw` boolean (the field Bitsocial directory lists already
+   define). It is read once, when the crawler schedules the list.
+3. **Inference from content** — any indexed comment in the community carrying
+   the protocol's `nsfw` flag means the community accepts NSFW content.
+
+`GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
+anything NSFW — the comment is flagged, or its community is — and `true`
+includes it. Listings (`/api/posts`) and the sitemap are not filtered.
 
 ### `webui/`
 
@@ -130,10 +154,10 @@ CORS-enabled so browser clients can call it directly.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | Status + index counts |
-| `GET /api/communities` | Indexed communities + post counts |
+| `GET /api/communities` | Indexed communities + post counts + `nsfw` flag |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
-| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=` |
+| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&nsfw=` (NSFW excluded by default) |
 | `GET /sitemap.xml`, `/robots.txt` | SEO |
 
 ## Running your own instance

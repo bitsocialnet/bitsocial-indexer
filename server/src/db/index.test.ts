@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { getThread, insertComments, listPosts, searchPosts, setBlocklist, stats, upsertCommunity } = await import('./index.js');
+const {
+  getCommunity,
+  getThread,
+  insertComments,
+  listPosts,
+  searchPosts,
+  setBlocklist,
+  setNsfwList,
+  stats,
+  upsertCommunity,
+} = await import('./index.js');
 type CommentInput = import('./index.js').CommentInput;
 
 const COMMUNITY = 'test.bso';
@@ -260,6 +270,57 @@ test('unblocking a comment that is also mod-removed keeps it a tombstone', () =>
   assert.equal(getThread('bl-removed')?.post.removed, 1);
   assert.equal(getThread('bl-removed')?.post.content, null);
   assert.equal(searchPosts({ q: 'ibex' }).total, 0, 'unblock never re-indexes removed content');
+});
+
+test('search excludes a flagged comment when asked, and includes it when not', () => {
+  insertComments([makeComment({ cid: 'nsfw-comment', content: 'explicit tapir', nsfw: true })]);
+
+  assert.equal(searchPosts({ q: 'tapir', nsfw: false }).total, 0);
+  assert.equal(searchPosts({ q: 'tapir', nsfw: true }).total, 1);
+  assert.equal(searchPosts({ q: 'tapir' }).total, 1, 'no opinion means no filtering');
+});
+
+test('search excludes every result from an NSFW community, flagged or not', () => {
+  const community = 'nsfw-community.bso';
+  upsertCommunity({ address: community, last_indexed_at: now });
+  insertComments([makeComment({ cid: 'nsfw-com-op', community_address: community, content: 'tame gerenuk' })]);
+  assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 1);
+
+  setNsfwList([{ address: community, nsfw: true }]);
+  assert.equal(getCommunity(community)?.nsfw, 1);
+  assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 0);
+  assert.equal(searchPosts({ q: 'gerenuk', nsfw: true }).total, 1);
+
+  setNsfwList([]);
+  assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 1);
+});
+
+test('the NSFW filter applies to the result total as well as the page', () => {
+  const community = 'nsfw-total.bso';
+  upsertCommunity({ address: community, last_indexed_at: now });
+  insertComments([
+    makeComment({ cid: 'nsfw-total-1', community_address: community, content: 'counted markhor' }),
+    makeComment({ cid: 'nsfw-total-2', community_address: community, content: 'counted markhor', nsfw: true }),
+  ]);
+
+  const excluded = searchPosts({ q: 'markhor', nsfw: false });
+  assert.equal(excluded.total, 1);
+  assert.equal(excluded.posts.length, 1);
+
+  const listed = listPosts({ community, nsfw: false });
+  assert.equal(listed.total, 1);
+  assert.equal(listed.posts.length, 1);
+  assert.equal(listPosts({ community }).total, 2, 'listings are unfiltered by default');
+});
+
+test('an update that omits nsfw never un-flags an already-flagged comment', () => {
+  const cid = 'nsfw-sticky';
+  insertComments([makeComment({ cid, content: 'sticky serval', nsfw: true })]);
+  insertComments([makeComment({ cid, upvote_count: 3 })]);
+
+  assert.equal(getThread(cid)?.post.nsfw, 1);
+  assert.equal(getThread(cid)?.post.upvote_count, 3, 'the rest of the update still applied');
+  assert.equal(searchPosts({ q: 'serval', nsfw: false }).total, 0);
 });
 
 test('stats count only servable comments', () => {

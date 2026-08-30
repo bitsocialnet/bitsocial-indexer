@@ -9,6 +9,7 @@ interface SearchQuery {
   page?: number;
   limit?: number;
   replies?: boolean;
+  nsfw?: boolean;
 }
 
 const searchQuerySchema = {
@@ -22,6 +23,8 @@ const searchQuerySchema = {
     page: { type: 'integer', minimum: 1, default: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 100, default: 25 },
     replies: { type: 'boolean', default: true },
+    // Safe default: NSFW results are excluded unless the client asks for them.
+    nsfw: { type: 'boolean', default: false },
   },
 } as const;
 
@@ -40,6 +43,9 @@ const route: FastifyPluginAsync = async (app) => {
         page: q.page,
         limit: q.limit,
         includeReplies: q.replies,
+        // The schema default applies, so an absent param excludes NSFW; pass it
+        // through explicitly rather than letting `undefined` mean "unfiltered".
+        nsfw: q.nsfw ?? false,
       }),
     };
   });

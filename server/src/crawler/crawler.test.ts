@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { CrawlTimeoutError, mapComment, runWithConcurrency, withTimeout } = await import('./crawler.js');
+const { CrawlTimeoutError, mapComment, parseCommunityEntry, runWithConcurrency, withTimeout } = await import(
+  './crawler.js'
+);
 
 const ADDRESS = 'test.bso';
 
@@ -50,6 +52,38 @@ test('mapComment picks up the upstream archived flag', () => {
 
 test('mapComment returns null without a cid', () => {
   assert.equal(mapComment({}, ADDRESS), null);
+});
+
+test('mapComment reads nsfw off the flattened comment and the CommentUpdate', () => {
+  assert.equal(mapComment({ cid: 'n1', timestamp: 1 }, ADDRESS)?.nsfw, false);
+  assert.equal(mapComment({ cid: 'n2', timestamp: 1, nsfw: true }, ADDRESS)?.nsfw, true);
+  assert.equal(mapComment({ cid: 'n3', timestamp: 1, raw: { commentUpdate: { nsfw: true } } }, ADDRESS)?.nsfw, true);
+  assert.equal(
+    mapComment({ cid: 'n4', timestamp: 1, raw: { commentUpdate: { edit: { nsfw: true } } } }, ADDRESS)?.nsfw,
+    true,
+  );
+});
+
+test('mapComment keeps an explicit nsfw:false from outranking a stale update', () => {
+  // pkc-js already resolved commentUpdate → edit → comment onto the flat field,
+  // so a flat `false` is a verdict, not a missing value.
+  const row = mapComment({ cid: 'n5', timestamp: 1, nsfw: false, raw: { commentUpdate: { nsfw: true } } }, ADDRESS);
+  assert.equal(row?.nsfw, false);
+});
+
+test('parseCommunityEntry accepts bare addresses and objects, keeping a stated nsfw flag', () => {
+  assert.deepEqual(parseCommunityEntry(' art.bso '), { address: 'art.bso' });
+  assert.deepEqual(parseCommunityEntry({ address: 'art.bso', title: 'Art' }), { address: 'art.bso' });
+  assert.deepEqual(parseCommunityEntry({ address: 'adult.bso', nsfw: true }), { address: 'adult.bso', nsfw: true });
+  assert.deepEqual(parseCommunityEntry({ address: 'sfw.bso', nsfw: false }), { address: 'sfw.bso', nsfw: false });
+});
+
+test('parseCommunityEntry ignores a non-boolean nsfw and unusable entries', () => {
+  assert.deepEqual(parseCommunityEntry({ address: 'art.bso', nsfw: 'yes' }), { address: 'art.bso' });
+  assert.equal(parseCommunityEntry({ address: '   ' }), null);
+  assert.equal(parseCommunityEntry(''), null);
+  assert.equal(parseCommunityEntry({ nsfw: true }), null);
+  assert.equal(parseCommunityEntry(null), null);
 });
 
 test('mapComment groups legacy publications under the configured canonical address', () => {

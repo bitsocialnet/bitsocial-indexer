@@ -6,7 +6,7 @@
  * the indexer serves an empty index — the dev decides what to index.
  */
 import { config, hasConfiguredCommunities } from '../config.js';
-import { insertComments, upsertCommunity, type CommentInput } from '../db/index.js';
+import { applyNsfwSignals, insertComments, setNsfwList, upsertCommunity, type CommentInput } from '../db/index.js';
 import { getPkcClient, resetPkcClient } from '../pkc/client.js';
 import { due, enqueue, markFailed, markRunning, markSuccess, reclaimAbandoned } from './queue.js';
 
@@ -46,21 +46,50 @@ export async function runWithConcurrency<T>(
   );
 }
 
-/** Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list. */
-export async function resolveCommunities(): Promise<string[]> {
-  const set = new Set(config.communities);
+export interface ConfiguredCommunity {
+  address: string;
+  /**
+   * The list's own NSFW verdict, when it states one. Bitsocial directory lists
+   * carry an optional `nsfw` boolean per entry (the same field seedit's client
+   * normalises); absent means the list has no opinion and the indexer falls
+   * back to inferring from content.
+   */
+  nsfw?: boolean;
+}
+
+/**
+ * Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list.
+ * Inline entries are addresses only, so a duplicate keeps the list entry's
+ * metadata — an operator naming a community in both places still gets the
+ * list's `nsfw` flag.
+ */
+export async function resolveCommunities(): Promise<ConfiguredCommunity[]> {
+  const found = new Map<string, ConfiguredCommunity>();
+  for (const address of config.communities) found.set(address, { address });
   if (config.communitiesSource) {
     try {
       const list = await loadSource(config.communitiesSource);
       for (const item of list) {
-        if (typeof item === 'string') set.add(item);
-        else if (item && typeof item === 'object' && 'address' in item) set.add(String((item as { address: unknown }).address));
+        const entry = parseCommunityEntry(item);
+        if (entry) found.set(entry.address, entry);
       }
     } catch (err) {
       console.error(`[crawler] failed to load COMMUNITIES_SOURCE (${config.communitiesSource}):`, err);
     }
   }
-  return [...set];
+  return [...found.values()];
+}
+
+/** One entry of a community list: a bare address, or an object carrying flags. */
+export function parseCommunityEntry(item: unknown): ConfiguredCommunity | null {
+  if (typeof item === 'string') return item.trim() ? { address: item.trim() } : null;
+  if (!item || typeof item !== 'object' || !('address' in item)) return null;
+  const o = item as { address: unknown; nsfw?: unknown };
+  const address = String(o.address).trim();
+  if (!address) return null;
+  // Only a real boolean counts as a verdict, matching how the seedit client
+  // normalises these lists: anything else leaves the signal unset.
+  return typeof o.nsfw === 'boolean' ? { address, nsfw: o.nsfw } : { address };
 }
 
 /** A community source is either an http(s) URL or a local file path. */
@@ -123,6 +152,10 @@ export function mapComment(c: any, communityAddress: string, seenAt = nowSec()):
     deleted: Boolean(c.deleted ?? c.edit?.deleted ?? update.edit?.deleted),
     mod_reason: c.reason ?? update.reason ?? c.edit?.reason ?? update.edit?.reason ?? null,
     upstream_archived: Boolean(c.archived ?? update.archived),
+    // pkc-js resolves nsfw as commentUpdate.nsfw → commentUpdate.edit.nsfw →
+    // comment.nsfw and flattens the winner onto the page comment, so the flat
+    // value is authoritative when present; the rest covers other shapes.
+    nsfw: Boolean(c.nsfw ?? update.nsfw ?? update.edit?.nsfw ?? c.edit?.nsfw),
   };
 }
 
@@ -193,6 +226,9 @@ async function indexCommunity(address: string): Promise<number> {
     description: community?.description ?? null,
     last_indexed_at: crawledAt,
   });
+  // Newly indexed comments can change the inferred signal, so re-resolve the
+  // NSFW verdict for every community this pass could have affected.
+  applyNsfwSignals();
   return inserted;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -235,12 +271,15 @@ export async function startCrawler(): Promise<void> {
     console.log('[crawler] idle — no communities configured (COMMUNITIES / COMMUNITIES_SOURCE empty).');
     return;
   }
-  const addresses = await resolveCommunities();
-  console.log(`[crawler] scheduling ${addresses.length} communities`);
-  for (const address of addresses) {
+  const communities = await resolveCommunities();
+  console.log(`[crawler] scheduling ${communities.length} communities`);
+  for (const { address } of communities) {
     upsertCommunity({ address, added_at: nowSec() });
     enqueue(address);
   }
+  // The list's own NSFW flags outrank inference, so apply them before the first
+  // pass rather than after it.
+  setNsfwList(communities);
   const reclaimed = reclaimAbandoned();
   if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
   console.log(

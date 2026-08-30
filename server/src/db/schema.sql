@@ -8,7 +8,11 @@ CREATE TABLE IF NOT EXISTS communities (
   title            TEXT,
   description      TEXT,
   added_at         INTEGER NOT NULL,           -- unix seconds
-  last_indexed_at  INTEGER
+  last_indexed_at  INTEGER,
+  -- Resolved NSFW flag. The protocol has no community.features.nsfw, so the
+  -- indexer derives it from three signals (operator override > directory list >
+  -- inference from flagged comments) — see applyNsfwSignals in db/index.ts.
+  nsfw             INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS comments (
@@ -41,6 +45,9 @@ CREATE TABLE IF NOT EXISTS comments (
   deleted           INTEGER NOT NULL DEFAULT 0, -- author-deleted
   mod_reason        TEXT,
   upstream_archived INTEGER NOT NULL DEFAULT 0, -- explicit `archived` flag in a CommentUpdate
+  -- The protocol's per-comment `nsfw` flag (author- or mod-set). Also the raw
+  -- material for inferring whether the whole community accepts NSFW content.
+  nsfw              INTEGER NOT NULL DEFAULT 0,
   -- Operator takedown (local blocklist, see BLOCKLIST_SOURCE). Reversible
   -- serve-time redaction: content columns are never destroyed, only this flag
   -- (plus FTS membership) toggles.
@@ -52,6 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_comments_community ON comments(community_address)
 CREATE INDEX IF NOT EXISTS idx_comments_timestamp ON comments(timestamp);
 CREATE INDEX IF NOT EXISTS idx_comments_post      ON comments(post_cid);
 CREATE INDEX IF NOT EXISTS idx_comments_parent    ON comments(parent_cid);
+-- idx_comments_nsfw (partial, over the flagged rows only) is created by
+-- migrate() instead: this file runs before the migration that adds
+-- comments.nsfw to a pre-existing archive, so the index cannot reference it yet.
 
 -- Full-text index. `cid` is stored but not tokenized so we can join back.
 CREATE VIRTUAL TABLE IF NOT EXISTS comments_fts USING fts5(

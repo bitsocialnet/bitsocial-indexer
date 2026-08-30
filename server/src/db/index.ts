@@ -12,6 +12,8 @@ export interface Community {
   description: string | null;
   added_at: number;
   last_indexed_at: number | null;
+  /** Resolved NSFW flag — see resolveNsfw / applyNsfwSignals below. */
+  nsfw: number;
 }
 
 export interface Comment {
@@ -40,6 +42,7 @@ export interface Comment {
   deleted: number;
   mod_reason: string | null;
   upstream_archived: number;
+  nsfw: number;
   takedown: number;
   takedown_reason: string | null;
 }
@@ -60,6 +63,13 @@ export interface ListOpts {
   page?: number;
   limit?: number;
   includeReplies?: boolean;
+  /**
+   * NSFW filter. `false` drops results that are NSFW — the comment carries the
+   * protocol flag, or its community does. `true`/undefined filters nothing, so
+   * listings and the sitemap keep their existing behaviour; only /api/search
+   * opts in, and it defaults to excluding.
+   */
+  nsfw?: boolean;
 }
 
 const TIME_WINDOW: Record<Exclude<TimeRange, 'all'>, number> = {
@@ -86,13 +96,23 @@ const ARCHIVED_SQL = `CASE WHEN c.upstream_archived = 1
     OR (c.last_seen_at IS NOT NULL AND m.last_indexed_at IS NOT NULL AND c.last_seen_at < m.last_indexed_at)
   THEN 1 ELSE 0 END`;
 
+/** `m` is the comment's community row; every query below reads flags off it. */
+const JOIN_COMMUNITY = 'LEFT JOIN communities m ON m.address = c.community_address';
+
 const SERVED_SELECT = `SELECT c.*, ${ARCHIVED_SQL} AS archived
-   FROM comments c LEFT JOIN communities m ON m.address = c.community_address`;
+   FROM comments c ${JOIN_COMMUNITY}`;
 
 /** Filter applied to every listing/search: mod-queue content is never served. */
 const NOT_PENDING = 'c.pending_approval = 0';
 /** Listings and search additionally hide tombstones (they have no content). */
 const VISIBLE = `${NOT_PENDING} AND c.removed = 0 AND c.deleted = 0 AND c.takedown = 0`;
+
+/**
+ * Opt-in NSFW exclusion. A result is NSFW when the comment itself carries the
+ * protocol flag or its community is resolved NSFW. `m` can be absent (a comment
+ * whose community row was never created), which counts as not-NSFW.
+ */
+const NOT_NSFW = 'c.nsfw = 0 AND COALESCE(m.nsfw, 0) = 0';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -132,6 +152,18 @@ function migrate(database: Database.Database): void {
   // start time, so it reads as abandoned — which is exactly right: it was
   // claimed by a process that is long gone.
   addColumns(database, 'crawl_queue', { started_at: 'INTEGER' });
+
+  // NSFW tracking. Deliberately its own call: an existing archive gaining only
+  // these columns must not re-run the seen-time backfill above. Both default to
+  // 0 (= not NSFW), so every already-indexed row keeps serving exactly as
+  // before until a signal says otherwise.
+  addColumns(database, 'comments', { nsfw: 'INTEGER NOT NULL DEFAULT 0' });
+  addColumns(database, 'communities', { nsfw: 'INTEGER NOT NULL DEFAULT 0' });
+  // Partial index: inference only ever asks which communities have a flagged
+  // comment, so indexing the flagged rows alone keeps that a seek instead of a
+  // scan of the whole archive. Lives here, not in schema.sql, because that file
+  // runs before the ALTER above on a pre-existing database.
+  database.exec('CREATE INDEX IF NOT EXISTS idx_comments_nsfw ON comments(community_address) WHERE nsfw = 1');
 }
 
 /** Add every missing column to `table`. Returns true when it changed anything. */
@@ -222,6 +254,92 @@ export function getCommunity(address: string): CommunitySummary | undefined {
   );
 }
 
+// ── NSFW signals ─────────────────────────────────────────────────────────────
+
+/**
+ * The Bitsocial protocol has `comment.nsfw` but no `community.features.nsfw`,
+ * so a client cannot ask the network whether a community is NSFW — the indexer
+ * has to be the place that knows. Three signals answer it, most authoritative
+ * first:
+ *
+ *   1. `override` — the operator's own file (NSFW_OVERRIDES_SOURCE, see
+ *      ../nsfw.ts). States NSFW *and* not-NSFW, so a bad inference is fixable.
+ *   2. `listed`   — the configured community list's own `nsfw` flag
+ *      (COMMUNITIES_SOURCE), the field seedit's directory lists already carry.
+ *   3. `inferred` — any indexed comment in the community is flagged NSFW, which
+ *      means the community accepts NSFW content.
+ */
+export interface NsfwSignals {
+  override?: boolean;
+  listed?: boolean;
+  inferred: boolean;
+}
+
+/** Precedence lives here and nowhere else: first signal with an opinion wins. */
+export function resolveNsfw(signals: NsfwSignals): boolean {
+  return signals.override ?? signals.listed ?? signals.inferred;
+}
+
+/** Operator override entry: forces one community NSFW or explicitly not-NSFW. */
+export interface NsfwOverride {
+  address: string;
+  nsfw: boolean;
+  reason: string | null;
+}
+
+/** Active signals 1 and 2, held in memory so either can be replaced on its own. */
+let nsfwOverrides = new Map<string, boolean>();
+let nsfwListed = new Map<string, boolean>();
+
+/**
+ * Recompute every community's resolved `nsfw` column from the current signals.
+ * Cheap enough to run whenever any of them changes: the inference query reads
+ * the partial index over flagged comments, and instances index tens of
+ * communities, not millions.
+ */
+export function applyNsfwSignals(): void {
+  const database = getDb();
+  const inferred = new Set(
+    (
+      database
+        .prepare('SELECT DISTINCT community_address AS address FROM comments WHERE nsfw = 1')
+        .all() as { address: string }[]
+    ).map((r) => r.address),
+  );
+  const rows = database.prepare('SELECT address, nsfw FROM communities').all() as {
+    address: string;
+    nsfw: number;
+  }[];
+  const update = database.prepare('UPDATE communities SET nsfw = @nsfw WHERE address = @address');
+
+  database.transaction(() => {
+    for (const row of rows) {
+      const next = resolveNsfw({
+        override: nsfwOverrides.get(row.address),
+        listed: nsfwListed.get(row.address),
+        inferred: inferred.has(row.address),
+      })
+        ? 1
+        : 0;
+      if (next !== row.nsfw) update.run({ address: row.address, nsfw: next });
+    }
+  })();
+}
+
+/** Apply operator overrides (see ../nsfw.ts for the file loader). */
+export function setNsfwOverrides(entries: NsfwOverride[]): void {
+  nsfwOverrides = new Map(entries.map((e) => [e.address, e.nsfw]));
+  applyNsfwSignals();
+}
+
+/** Apply the `nsfw` flags carried by the configured community list. */
+export function setNsfwList(entries: { address: string; nsfw?: boolean }[]): void {
+  nsfwListed = new Map(
+    entries.filter((e): e is { address: string; nsfw: boolean } => typeof e.nsfw === 'boolean').map((e) => [e.address, e.nsfw]),
+  );
+  applyNsfwSignals();
+}
+
 // ── posts / threads ──────────────────────────────────────────────────────────
 
 export interface PostPage {
@@ -235,6 +353,7 @@ function buildFilters(o: ListOpts): { where: string[]; params: Record<string, un
   const where = [VISIBLE];
   const params: Record<string, unknown> = {};
   if (!o.includeReplies) where.push('c.depth = 0');
+  if (o.nsfw === false) where.push(NOT_NSFW);
   if (o.community) {
     where.push('c.community_address = @community');
     params.community = o.community;
@@ -257,7 +376,8 @@ export function listPosts(o: ListOpts = {}): PostPage {
     `${SERVED_SELECT} WHERE ${w} ORDER BY ${order} LIMIT @limit OFFSET @offset`,
     { ...params, limit, offset },
   );
-  const total = one<{ n: number }>(`SELECT COUNT(*) AS n FROM comments c WHERE ${w}`, params)?.n ?? 0;
+  const total =
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM comments c ${JOIN_COMMUNITY} WHERE ${w}`, params)?.n ?? 0;
   return { posts: posts.map(serve), page, limit, total };
 }
 
@@ -394,7 +514,7 @@ export function searchPosts(o: ListOpts & { q: string }): PostPage {
   const posts = all<ServedComment>(
     `SELECT c.*, ${ARCHIVED_SQL} AS archived FROM comments_fts f
        JOIN comments c ON c.cid = f.cid
-       LEFT JOIN communities m ON m.address = c.community_address
+       ${JOIN_COMMUNITY}
       WHERE comments_fts MATCH @match AND ${w}
       ORDER BY ${order} LIMIT @limit OFFSET @offset`,
     { ...params, limit, offset },
@@ -403,6 +523,7 @@ export function searchPosts(o: ListOpts & { q: string }): PostPage {
     one<{ n: number }>(
       `SELECT COUNT(*) AS n FROM comments_fts f
          JOIN comments c ON c.cid = f.cid
+         ${JOIN_COMMUNITY}
         WHERE comments_fts MATCH @match AND ${w}`,
       params,
     )?.n ?? 0;
@@ -436,6 +557,7 @@ export interface CommentInput {
   deleted?: boolean;
   mod_reason?: string | null;
   upstream_archived?: boolean;
+  nsfw?: boolean;
 }
 
 /**
@@ -451,6 +573,8 @@ export interface CommentInput {
  * - removed/deleted comments stay as rows (tombstones) but leave the FTS index.
  * - blocklisted CIDs (operator takedown) are marked on insert and never enter
  *   the FTS index — re-crawling cannot resurrect a takedown.
+ * - `nsfw` only ever ratchets up, so a page that omits the flag cannot quietly
+ *   un-flag a comment (and with it its community's inferred verdict).
  *
  * Returns the number of newly inserted comments.
  */
@@ -468,13 +592,13 @@ export function insertComments(rows: CommentInput[]): number {
         author_address, author_name, title, content, link, thumbnail_url,
         upvote_count, downvote_count, reply_count, raw, indexed_at, removed_at,
         first_seen_at, last_seen_at, pending_approval, removed, deleted, mod_reason, upstream_archived,
-        takedown, takedown_reason)
+        nsfw, takedown, takedown_reason)
      VALUES
        (@cid, @community_address, @post_cid, @parent_cid, @depth, @timestamp,
         @author_address, @author_name, @title, @content, @link, @thumbnail_url,
         @upvote_count, @downvote_count, @reply_count, @raw, @indexed_at, @removed_at,
         @first_seen_at, @last_seen_at, 0, @removed, @deleted, @mod_reason, @upstream_archived,
-        @takedown, @takedown_reason)`,
+        @nsfw, @takedown, @takedown_reason)`,
   );
   const update = database.prepare(
     `UPDATE comments SET
@@ -487,6 +611,10 @@ export function insertComments(rows: CommentInput[]): number {
         removed = @removed,
         deleted = @deleted,
         upstream_archived = MAX(upstream_archived, @upstream_archived),
+        -- Sticky, like upstream_archived: a page that simply omits the flag must
+        -- not silently un-flag content a safe-default search relies on. An
+        -- operator override is how a wrong NSFW verdict gets corrected.
+        nsfw = MAX(nsfw, @nsfw),
         mod_reason = COALESCE(@mod_reason, mod_reason),
         title = COALESCE(@title, title),
         content = COALESCE(@content, content),
@@ -535,6 +663,7 @@ export function insertComments(rows: CommentInput[]): number {
         deleted,
         mod_reason: r.mod_reason ?? null,
         upstream_archived: r.upstream_archived ? 1 : 0,
+        nsfw: r.nsfw ? 1 : 0,
         last_seen_at: seenAt,
         now,
       };

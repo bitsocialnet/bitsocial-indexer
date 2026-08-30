@@ -3,10 +3,12 @@ import { startBlocklist, stopBlocklist } from './blocklist.js';
 import { config } from './config.js';
 import { startCrawler, stopCrawler } from './crawler/crawler.js';
 import { getDb } from './db/index.js';
+import { startNsfwOverrides, stopNsfwOverrides } from './nsfw.js';
 
 async function main(): Promise<void> {
   getDb(); // initialise schema
   await startBlocklist(); // apply operator takedowns before serving anything
+  await startNsfwOverrides(); // …and the operator's NSFW verdicts
 
   if (config.seedDemo) {
     const { seedDemo } = await import('./db/seed.js');
@@ -22,6 +24,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     stopCrawler();
     stopBlocklist();
+    stopNsfwOverrides();
     await app.close();
     process.exit(0);
   };

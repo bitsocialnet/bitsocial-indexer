@@ -38,6 +38,13 @@ export const config = {
    */
   blocklistSource: process.env.BLOCKLIST_SOURCE ?? '',
 
+  /**
+   * Operator NSFW overrides: path to a JSON file naming communities this
+   * instance must treat as NSFW (or explicitly not NSFW, to correct a bad
+   * inference). Empty = no overrides. See src/nsfw.ts.
+   */
+  nsfwOverridesSource: process.env.NSFW_OVERRIDES_SOURCE ?? '',
+
   /** Pagination bounds per crawl pass (keeps a single tick bounded). */
   crawlMaxPages: Number(process.env.CRAWL_MAX_PAGES ?? 20),
   crawlMaxReplyDepth: Number(process.env.CRAWL_MAX_REPLY_DEPTH ?? 6),
