@@ -242,3 +242,84 @@ test('API never serves pending-approval comments', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/posts/api-pending' });
   assert.equal(res.statusCode, 404);
 });
+
+test('search honours the old.reddit-style advanced filters', async () => {
+  upsertCommunity({ address: 'api-adv.bso', last_indexed_at: 1 });
+  insertComments([
+    {
+      cid: 'api-adv-text',
+      community_address: 'api-adv.bso',
+      post_cid: 'api-adv-text',
+      depth: 0,
+      timestamp: 1,
+      author_address: 'lena.bso',
+      author_name: 'Lena',
+      title: 'ink study',
+      content: 'notes on the tokenizer, aardwolf',
+    },
+    {
+      cid: 'api-adv-link',
+      community_address: 'api-adv.bso',
+      post_cid: 'api-adv-link',
+      depth: 0,
+      timestamp: 2,
+      author_address: 'nils.bso',
+      content: 'aardwolf',
+      link: 'https://www.example.com/ink-study/1',
+    },
+    {
+      cid: 'api-adv-decoy',
+      community_address: 'api-adv.bso',
+      post_cid: 'api-adv-decoy',
+      depth: 0,
+      timestamp: 3,
+      author_address: 'nils.bso',
+      content: 'aardwolf',
+      link: 'https://evil.example/?r=example.com',
+    },
+  ]);
+
+  const total = async (query: string) => {
+    const res = await app.inject({ method: 'GET', url: `/api/search?${query}` });
+    assert.equal(res.statusCode, 200, query);
+    return (res.json() as { total: number }).total;
+  };
+
+  assert.equal(await total('q=aardwolf'), 3);
+  assert.equal(await total('q=aardwolf&author=lena.bso'), 1, 'author: by address');
+  assert.equal(await total('q=aardwolf&author=Lena'), 1, 'author: or by display name');
+  assert.equal(await total('q=aardwolf&site=example.com'), 1, 'site: the parsed host, subdomains included');
+  assert.equal(await total('q=aardwolf&url=ink-study'), 1, 'url: a substring of the link');
+  assert.equal(await total('q=aardwolf&selftext=tokenizer'), 1, 'selftext: words in the body');
+  assert.equal(await total('q=aardwolf&self=yes'), 1, 'self=yes: text posts');
+  assert.equal(await total('q=aardwolf&self=no'), 2, 'self=no: link posts');
+  assert.equal(await total('q=aardwolf'), 3, 'self absent: no opinion, link posts kept');
+  assert.equal(await total('q=aardwolf&author=nils.bso&site=example.com&self=no'), 1, 'and they AND together');
+  assert.equal(await total('q=aardwolf&author=lena.bso&site=example.com'), 0);
+  assert.equal(await total('q=hoopoe&author=lena.bso'), 0, 'free text narrows the filters too');
+});
+
+test('search runs the advanced filters with no q at all', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/search?author=lena.bso' });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { query: string; total: number; posts: { cid: string }[] };
+  assert.equal(body.query, '');
+  assert.equal(body.total, 1);
+  assert.equal(body.posts[0]?.cid, 'api-adv-text');
+
+  // Narrowing parameters are not a search by themselves: without free text or
+  // an advanced filter the endpoint still returns an empty page.
+  const narrowing = await app.inject({ method: 'GET', url: '/api/search?community=api-adv.bso&time=all' });
+  assert.equal((narrowing.json() as { total: number }).total, 0);
+});
+
+test('search rejects an unknown self value and drops unknown parameters', async () => {
+  const bad = await app.inject({ method: 'GET', url: '/api/search?q=aardwolf&self=maybe' });
+  assert.equal(bad.statusCode, 400);
+
+  // additionalProperties: false, as on /api/posts — Fastify strips what the
+  // schema does not declare rather than failing the request.
+  const unknown = await app.inject({ method: 'GET', url: '/api/search?q=aardwolf&nope=1' });
+  assert.equal(unknown.statusCode, 200);
+  assert.equal((unknown.json() as { total: number }).total, 3);
+});

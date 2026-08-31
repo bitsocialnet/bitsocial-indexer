@@ -333,3 +333,132 @@ test('stats count only servable comments', () => {
   const after = stats();
   assert.equal(after.posts, before.posts + 1);
 });
+
+// ── old.reddit-style advanced search filters ─────────────────────────────────
+
+test('search: author matches the address or the display name, exactly', () => {
+  insertComments([
+    makeComment({ cid: 'adv-author-1', author_address: 'lena.bso', author_name: 'Lena', content: 'filtered ringtail' }),
+    makeComment({
+      cid: 'adv-author-2',
+      author_address: 'lena-imposter.bso',
+      author_name: 'Lena Imposter',
+      content: 'filtered ringtail',
+    }),
+  ]);
+
+  assert.equal(searchPosts({ q: 'ringtail' }).total, 2);
+  assert.equal(searchPosts({ q: 'ringtail', author: 'lena.bso' }).total, 1, 'by address');
+  assert.equal(searchPosts({ q: 'ringtail', author: 'Lena' }).total, 1, 'or by display name');
+  assert.equal(searchPosts({ q: 'ringtail', author: 'LENA.BSO' }).total, 1, 'case-insensitively');
+  assert.equal(searchPosts({ q: 'ringtail', author: 'lena' }).total, 1, 'the name is not the address');
+  assert.equal(searchPosts({ q: 'ringtail', author: 'len' }).total, 0, 'exact — never a prefix');
+  assert.equal(searchPosts({ q: 'ringtail', author: 'imposter' }).total, 0, 'and never a substring');
+});
+
+test('search: site matches the parsed link host, subdomains included', () => {
+  insertComments([
+    makeComment({ cid: 'adv-site-1', link: 'https://example.com/ink-study', content: 'linked quoll' }),
+    makeComment({ cid: 'adv-site-2', link: 'https://sub.example.com/other', content: 'linked quoll' }),
+    makeComment({ cid: 'adv-site-3', link: 'https://evil.test/?r=example.com', content: 'linked quoll' }),
+    makeComment({ cid: 'adv-site-4', link: 'https://notexample.com/x', content: 'linked quoll' }),
+  ]);
+  const cids = (site: string) =>
+    searchPosts({ q: 'quoll', site })
+      .posts.map((p) => p.cid)
+      .sort();
+
+  assert.deepEqual(cids('example.com'), ['adv-site-1', 'adv-site-2'], 'the host and its subdomains');
+  assert.deepEqual(cids('EXAMPLE.com'), ['adv-site-1', 'adv-site-2'], 'case-insensitively');
+  assert.deepEqual(cids('https://example.com/whatever'), ['adv-site-1', 'adv-site-2'], 'a pasted URL works too');
+  assert.deepEqual(cids('sub.example.com'), ['adv-site-2'], 'and narrows to the subdomain when asked');
+  assert.deepEqual(cids('xample.com'), [], 'no suffix match without the dot boundary');
+  assert.equal(searchPosts({ q: 'quoll', site: 'example.com' }).total, 2, 'a URL that merely mentions the domain is not a match');
+});
+
+test('search: url is a substring of the whole link, which site is not', () => {
+  assert.equal(searchPosts({ q: 'quoll', url: 'ink-study' }).total, 1, 'reaches into the path');
+  assert.equal(searchPosts({ q: 'quoll', url: 'example.com' }).total, 4, 'and does not care where it appears');
+  assert.equal(searchPosts({ q: 'quoll', url: '%' }).total, 0, 'LIKE wildcards are escaped, not honoured');
+  assert.equal(searchPosts({ q: 'quoll', url: 'INK-STUDY' }).total, 1, 'case-insensitively');
+});
+
+test('search: selftext matches the body alone, not the title', () => {
+  insertComments([
+    makeComment({ cid: 'adv-text-1', title: 'tokenizer', content: 'a note about numbat' }),
+    makeComment({ cid: 'adv-text-2', title: 'nothing to see', content: 'a tokenizer for numbat' }),
+  ]);
+
+  assert.equal(searchPosts({ q: 'numbat' }).total, 2);
+  const body = searchPosts({ q: 'numbat', selftext: 'tokenizer' });
+  assert.equal(body.total, 1);
+  assert.equal(body.posts[0]?.cid, 'adv-text-2');
+  assert.equal(searchPosts({ selftext: 'tokenizer' }).total, 1, 'and works as the whole query');
+});
+
+test('search: self is three-state — yes, no, and no opinion', () => {
+  insertComments([
+    makeComment({ cid: 'adv-self-text', content: 'threestate kudu' }),
+    makeComment({ cid: 'adv-self-link', content: 'threestate kudu', link: 'https://example.org/a' }),
+    makeComment({ cid: 'adv-self-blank', content: 'threestate kudu', link: '' }),
+  ]);
+  const cids = (self?: 'yes' | 'no') =>
+    searchPosts({ q: 'kudu', self })
+      .posts.map((p) => p.cid)
+      .sort();
+
+  assert.deepEqual(cids(), ['adv-self-blank', 'adv-self-link', 'adv-self-text'], 'absent means no opinion');
+  assert.deepEqual(cids('yes'), ['adv-self-blank', 'adv-self-text'], 'text posts only');
+  assert.deepEqual(cids('no'), ['adv-self-link'], 'link posts only');
+});
+
+test('search: the advanced filters compose instead of the last one winning', () => {
+  insertComments([
+    makeComment({ cid: 'adv-mix-1', author_address: 'mixa.bso', link: 'https://example.com/ink-study', content: 'compose serow' }),
+    makeComment({ cid: 'adv-mix-2', author_address: 'mixb.bso', link: 'https://example.com/ink-study', content: 'compose serow' }),
+    makeComment({ cid: 'adv-mix-3', author_address: 'mixa.bso', link: 'https://other.test/ink-study', content: 'compose serow' }),
+    makeComment({ cid: 'adv-mix-4', author_address: 'mixa.bso', link: 'https://example.com/gallery', content: 'compose serow' }),
+  ]);
+
+  assert.equal(searchPosts({ q: 'serow', author: 'mixa.bso' }).total, 3);
+  assert.equal(searchPosts({ q: 'serow', author: 'mixa.bso', site: 'example.com' }).total, 2);
+  assert.equal(searchPosts({ q: 'serow', author: 'mixa.bso', site: 'example.com', url: 'ink-study' }).total, 1);
+  assert.equal(
+    searchPosts({ q: 'serow', author: 'mixa.bso', site: 'example.com', url: 'ink-study', self: 'no' }).total,
+    1,
+    'a filter that agrees with the rest changes nothing',
+  );
+  assert.equal(
+    searchPosts({ q: 'serow', author: 'mixa.bso', site: 'example.com', url: 'ink-study', self: 'yes' }).total,
+    0,
+    'and one that contradicts them empties the result',
+  );
+  assert.equal(searchPosts({ q: 'gerbil', author: 'mixa.bso' }).total, 0, 'free text narrows too');
+
+  const narrowed = searchPosts({ q: 'serow', author: 'mixa.bso', site: 'example.com' });
+  assert.equal(narrowed.posts.length, narrowed.total, 'the total counts the filtered rows, not the matched ones');
+});
+
+test('search: the advanced filters compose with community and the NSFW default', () => {
+  const community = 'adv-nsfw.bso';
+  upsertCommunity({ address: community, last_indexed_at: now });
+  insertComments([
+    makeComment({ cid: 'adv-nsfw-1', community_address: community, author_address: 'saiga.bso', content: 'filtered saiga' }),
+    makeComment({ cid: 'adv-nsfw-2', author_address: 'saiga.bso', content: 'filtered saiga', nsfw: true }),
+  ]);
+
+  assert.equal(searchPosts({ q: 'saiga', author: 'saiga.bso' }).total, 2, 'no opinion on NSFW');
+  assert.equal(searchPosts({ q: 'saiga', author: 'saiga.bso', nsfw: false }).total, 1);
+  assert.equal(searchPosts({ q: 'saiga', author: 'saiga.bso', community }).total, 1);
+  assert.equal(searchPosts({ q: 'saiga', author: 'saiga.bso', community, nsfw: false }).total, 1);
+});
+
+test('search: filters alone are a query, but no filters and no q are not', () => {
+  assert.equal(searchPosts({ q: '' }).total, 0);
+  assert.equal(searchPosts({}).total, 0);
+  assert.equal(searchPosts({ q: '', community: COMMUNITY }).total, 0, 'a community is not a search by itself');
+  assert.equal(searchPosts({ q: '', author: 'mixa.bso' }).total, 3, 'an author is');
+  assert.equal(searchPosts({ site: 'other.test' }).total, 1);
+  assert.equal(searchPosts({ url: 'ink-study', self: 'no' }).total, 4);
+  assert.equal(searchPosts({ author: 'mixa.bso', self: 'yes' }).total, 0);
+});

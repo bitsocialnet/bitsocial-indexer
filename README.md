@@ -187,8 +187,29 @@ CORS-enabled so browser clients can call it directly.
 | `GET /api/communities` | Indexed communities + post counts + resolved `nsfw` flag + declared `safe_for_work` |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
-| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&nsfw=` (NSFW excluded by default) |
+| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=`, plus the advanced filters below (NSFW excluded by default) |
 | `GET /sitemap.xml`, `/robots.txt` | SEO |
+
+### Advanced search filters
+
+`/api/search` also accepts the five old.reddit-style filters a client parses out
+of its search box, so they no longer have to be passed through as literal query
+text. Each is optional, and they AND together — with each other and with `q`,
+`community`, `time` and `nsfw` — so a query only ever narrows:
+
+| Param | Prefix | Matches |
+|-------|--------|---------|
+| `author` | `author:lena.bso` | Exactly (case-insensitively) the author's address **or** display name. Never a prefix or substring: an author is an identity, so `lena` must not stand in for `lena-imposter.bso` |
+| `site` | `site:example.com` | The link's parsed **host**, subdomains included (`www.example.com` counts). Never a substring of the URL, so `https://evil.com/?r=example.com` is not a match |
+| `url` | `url:ink-study` | A substring of the whole link — the path / slug / query search that `site` deliberately is not |
+| `selftext` | `selftext:tokenizer` | Words in the post body, through the same full-text index `q` uses |
+| `self` | `self:yes` / `self:no` | `yes` = text posts only, `no` = link posts only. Three-state: **absent means no opinion** and keeps both |
+
+`q` may be empty when at least one filter is set: `?author=lena.bso` is a
+complete query, answered newest-first since there is no relevance to rank.
+`?community=…` alone is not — narrowing parameters need something to narrow, and
+`/api/posts` is the listing endpoint. Only `/api/search` takes these; `/api/posts`
+and the sitemap are unchanged.
 
 ## Running your own instance
 

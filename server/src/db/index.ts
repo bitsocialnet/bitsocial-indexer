@@ -78,6 +78,53 @@ export interface ListOpts {
   nsfw?: boolean;
 }
 
+/** `self:yes` (text posts only) / `self:no` (link posts only). */
+export type SelfFilter = 'yes' | 'no';
+
+/**
+ * The old.reddit-style advanced filters `/api/search` accepts alongside `q`.
+ * Every one is optional and they AND together — with each other and with
+ * `q`/`community`/`time`/`nsfw` — so a query only ever narrows as filters are
+ * added. They are search-only: `/api/posts` and the sitemap never pass them.
+ */
+export interface SearchFilters {
+  /**
+   * `author:lena.bso` — an exact, case-insensitive match against EITHER the
+   * author's address or their display name, because a user may type either and
+   * neither can be derived from the other. Exact rather than prefix/substring
+   * on purpose: an author is an identity, so `author:lena` must not quietly
+   * widen to `lena-imposter.bso`. (old.reddit's `author:` is exact too.)
+   */
+  author?: string;
+  /**
+   * `site:example.com` — the link's *host*, parsed, never a substring of the
+   * whole URL, or `site:example.com` would also match
+   * `https://evil.com/?r=example.com`. Subdomains count: it matches
+   * `www.example.com` and `sub.example.com` as well, since `www.` is the most
+   * common stored form and people mean "posts linking to that site", not "to
+   * that exact hostname". Use `url` when you want the narrower thing.
+   */
+  site?: string;
+  /**
+   * `url:ink-study` — a case-insensitive substring of the whole link. Kept
+   * distinct from `site`: this is how a path, slug or query fragment is found.
+   */
+  url?: string;
+  /**
+   * `selftext:tokenizer` — words in the post body. Routed through the FTS index
+   * (its `content` column) rather than a LIKE over `comments.content`: same
+   * word-prefix semantics as `q`, and it keeps a body-only search an index seek
+   * instead of a scan of the whole archive.
+   */
+  selftext?: string;
+  /**
+   * `self:yes` / `self:no`. Three-state: absent means "no opinion" and filters
+   * nothing. A boolean with a default would make an absent parameter silently
+   * drop every link post.
+   */
+  self?: SelfFilter;
+}
+
 const TIME_WINDOW: Record<Exclude<TimeRange, 'all'>, number> = {
   hour: 3_600,
   day: 86_400,
@@ -131,6 +178,11 @@ export function getDb(): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('busy_timeout = 5000');
+  // `site:` searches match a link's parsed host, which SQL cannot work out on
+  // its own. Deterministic so SQLite may reuse the value within a statement;
+  // deliberately never used in an index, because an index over an app-defined
+  // function makes the file unreadable to a connection that never registered it.
+  db.function('link_host', { deterministic: true }, (link) => linkHost(link as string | null));
   db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
   migrate(db);
   return db;
@@ -546,47 +598,140 @@ export function setBlocklist(entries: BlocklistEntry[]): void {
 
 // ── search ───────────────────────────────────────────────────────────────────
 
-/** Turn raw user input into a safe FTS5 MATCH expression (AND of prefix terms). */
-function toFtsQuery(q: string): string {
+/**
+ * Turn raw user input into a safe FTS5 MATCH expression (AND of prefix terms).
+ * `column` restricts every term to one FTS column, which is how `selftext`
+ * searches the body alone; `:` is among the stripped characters, so user input
+ * can never open a column filter of its own.
+ */
+function toFtsQuery(q: string, column?: 'content'): string {
+  const prefix = column ? `${column}:` : '';
   return q
     .replace(/["()*:^]/g, ' ')
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((t) => `"${t}"*`)
+    .map((t) => `${prefix}"${t}"*`)
     .join(' ');
 }
 
-export function searchPosts(o: ListOpts & { q: string }): PostPage {
-  const match = toFtsQuery(o.q);
-  if (!match) return { posts: [], page: 1, limit: o.limit ?? 25, total: 0 };
+/** Free text and `selftext` share one MATCH expression, ANDed together. */
+function toMatch(o: { q?: string; selftext?: string }): string {
+  return [toFtsQuery(o.q ?? ''), toFtsQuery(o.selftext ?? '', 'content')].filter(Boolean).join(' ');
+}
+
+/** A URL's host, lowercased — NULL for anything that will not parse as a URL. */
+function linkHost(link: string | null): string | null {
+  if (!link) return null;
+  try {
+    return new URL(link).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `site` normally arrives as a bare domain, but a pasted URL has to work too, so
+ * both go through the same parser (which also handles case, ports, paths and
+ * IDN). Input that will not parse is kept as typed rather than dropped: a filter
+ * that quietly disappears would widen the results instead of narrowing them.
+ */
+function normalizeSite(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  return linkHost(raw.includes('://') ? raw : `https://${raw}`) ?? raw.toLowerCase();
+}
+
+/** A LIKE pattern matching `value` anywhere, with LIKE's wildcards escaped. */
+function likeContains(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/** Address or display name, either one, exactly — see SearchFilters.author. */
+const AUTHOR_SQL =
+  '(c.author_address = @author COLLATE NOCASE OR c.author_name = @author COLLATE NOCASE)';
+
+/**
+ * Host equality, plus a dot-anchored suffix test for subdomains. The suffix is
+ * compared with substr/= rather than LIKE so the domain cannot carry wildcards,
+ * and the leading '.' is what stops `notexample.com` matching `example.com`.
+ */
+const SITE_SQL = `(link_host(c.link) = @site
+     OR substr(link_host(c.link), -(length(@site) + 1)) = '.' || @site)`;
+
+/** Substring of the link — necessarily unindexed, unlike SITE_SQL's equality. */
+const URL_SQL = "c.link LIKE @url ESCAPE '\\'";
+
+/** A post is a text post when it carries no link, a link post when it does. */
+const SELF_POST = "(c.link IS NULL OR c.link = '')";
+const LINK_POST = "(c.link IS NOT NULL AND c.link != '')";
+
+/**
+ * The advanced filters as WHERE terms. `selftext` is absent on purpose: it is
+ * part of the MATCH expression (see toMatch), not a column filter.
+ */
+function buildSearchFilters(o: SearchFilters): { where: string[]; params: Record<string, unknown> } {
+  const where: string[] = [];
+  const params: Record<string, unknown> = {};
+  const author = o.author?.trim();
+  if (author) {
+    where.push(AUTHOR_SQL);
+    params.author = author;
+  }
+  const site = normalizeSite(o.site ?? '');
+  if (site) {
+    where.push(SITE_SQL);
+    params.site = site;
+  }
+  const url = o.url?.trim();
+  if (url) {
+    where.push(URL_SQL);
+    params.url = likeContains(url);
+  }
+  if (o.self === 'yes') where.push(SELF_POST);
+  if (o.self === 'no') where.push(LINK_POST);
+  return { where, params };
+}
+
+export function searchPosts(o: ListOpts & SearchFilters & { q?: string }): PostPage {
+  const match = toMatch(o);
+  const filters = buildSearchFilters(o);
+  // Nothing to search on. `community`/`time`/`nsfw` narrow a search rather than
+  // being one, so they still land here — but any content filter makes an empty
+  // `q` a real query, which is what `author:lena.bso` with no words has to mean.
+  if (!match && filters.where.length === 0) return { posts: [], page: 1, limit: o.limit ?? 25, total: 0 };
 
   const limit = Math.min(Math.max(o.limit ?? 25, 1), 100);
   const page = Math.max(o.page ?? 1, 1);
   const offset = (page - 1) * limit;
 
   const { where, params } = buildFilters(o);
-  params.match = match;
+  // One AND-ed list: every filter narrows the previous ones instead of
+  // replacing them, and the same list is reused for the total.
+  where.push(...filters.where);
+  Object.assign(params, filters.params);
   const w = where.join(' AND ');
-  // 'top'/'replies'/'new'/'old' sort, defaulting to FTS relevance for the default.
-  const order = o.sort ? ORDER_BY[o.sort] : 'f.rank';
+
+  // With text to match, FTS drives the query and the filters narrow its rows.
+  // With filters alone there is nothing to MATCH, so this degrades to the same
+  // filtered scan /api/posts already runs — and relevance has nothing to rank,
+  // hence newest-first.
+  const from = match
+    ? `comments_fts f JOIN comments c ON c.cid = f.cid ${JOIN_COMMUNITY}`
+    : `comments c ${JOIN_COMMUNITY}`;
+  const matched = match ? 'comments_fts MATCH @match AND ' : '';
+  if (match) params.match = match;
+  // 'top'/'replies'/'new'/'old' sort, defaulting to FTS relevance where there is any.
+  const order = match ? (o.sort ? ORDER_BY[o.sort] : 'f.rank') : ORDER_BY[o.sort ?? 'new'];
 
   const posts = all<ServedComment>(
-    `SELECT c.*, ${ARCHIVED_SQL} AS archived FROM comments_fts f
-       JOIN comments c ON c.cid = f.cid
-       ${JOIN_COMMUNITY}
-      WHERE comments_fts MATCH @match AND ${w}
+    `SELECT c.*, ${ARCHIVED_SQL} AS archived FROM ${from}
+      WHERE ${matched}${w}
       ORDER BY ${order} LIMIT @limit OFFSET @offset`,
     { ...params, limit, offset },
   );
   const total =
-    one<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM comments_fts f
-         JOIN comments c ON c.cid = f.cid
-         ${JOIN_COMMUNITY}
-        WHERE comments_fts MATCH @match AND ${w}`,
-      params,
-    )?.n ?? 0;
+    one<{ n: number }>(`SELECT COUNT(*) AS n FROM ${from} WHERE ${matched}${w}`, params)?.n ?? 0;
   return { posts: posts.map(serve), page, limit, total };
 }
 
