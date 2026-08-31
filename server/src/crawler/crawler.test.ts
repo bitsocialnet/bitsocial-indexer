@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { CrawlTimeoutError, mapComment, parseCommunityEntry, runWithConcurrency, withTimeout } = await import(
-  './crawler.js'
-);
+const {
+  CrawlTimeoutError,
+  directoryListSource,
+  mapComment,
+  parseCommunityEntry,
+  parseDirectoryDefaults,
+  readSafeForWork,
+  resolveDirectorySafeForWork,
+  runWithConcurrency,
+  withTimeout,
+} = await import('./crawler.js');
 
 const ADDRESS = 'test.bso';
 
@@ -71,19 +82,131 @@ test('mapComment keeps an explicit nsfw:false from outranking a stale update', (
   assert.equal(row?.nsfw, false);
 });
 
-test('parseCommunityEntry accepts bare addresses and objects, keeping a stated nsfw flag', () => {
-  assert.deepEqual(parseCommunityEntry(' art.bso '), { address: 'art.bso' });
-  assert.deepEqual(parseCommunityEntry({ address: 'art.bso', title: 'Art' }), { address: 'art.bso' });
-  assert.deepEqual(parseCommunityEntry({ address: 'adult.bso', nsfw: true }), { address: 'adult.bso', nsfw: true });
-  assert.deepEqual(parseCommunityEntry({ address: 'sfw.bso', nsfw: false }), { address: 'sfw.bso', nsfw: false });
+test('parseCommunityEntry accepts a bare address or an object carrying one', () => {
+  assert.equal(parseCommunityEntry(' art.bso '), 'art.bso');
+  assert.equal(parseCommunityEntry({ address: 'art.bso', title: 'Art' }), 'art.bso');
+  // A directory board entry: extra fields are ignored, the address is all we take.
+  assert.equal(parseCommunityEntry({ address: 'flash-posting.bso', publicKey: '12D3Koo', score: 4 }), 'flash-posting.bso');
 });
 
-test('parseCommunityEntry ignores a non-boolean nsfw and unusable entries', () => {
-  assert.deepEqual(parseCommunityEntry({ address: 'art.bso', nsfw: 'yes' }), { address: 'art.bso' });
+test('parseCommunityEntry rejects unusable entries', () => {
   assert.equal(parseCommunityEntry({ address: '   ' }), null);
   assert.equal(parseCommunityEntry(''), null);
-  assert.equal(parseCommunityEntry({ nsfw: true }), null);
+  assert.equal(parseCommunityEntry({ title: 'no address' }), null);
   assert.equal(parseCommunityEntry(null), null);
+});
+
+// ── features.safeForWork ─────────────────────────────────────────────────────
+
+test('readSafeForWork keeps the protocol flag three-state', () => {
+  assert.equal(readSafeForWork({ features: { safeForWork: true } }), 1);
+  assert.equal(readSafeForWork({ features: { safeForWork: false } }), 0);
+  assert.equal(readSafeForWork({ features: {} }), null, 'a community with other features but not this one');
+  assert.equal(readSafeForWork({}), null, 'no features object at all');
+  assert.equal(readSafeForWork(undefined), null);
+});
+
+test('readSafeForWork treats a non-boolean value as undeclared, never as true', () => {
+  // pkc-js types the field z.boolean().optional() with no default, so anything
+  // that is not a boolean is a malformed record, not a declaration.
+  assert.equal(readSafeForWork({ features: { safeForWork: 'false' } }), null);
+  assert.equal(readSafeForWork({ features: { safeForWork: 0 } }), null);
+  assert.equal(readSafeForWork({ features: { safeForWork: null } }), null);
+});
+
+// ── directory-level safeForWork ──────────────────────────────────────────────
+
+test('directoryListSource points at the defaults file’s sibling for a code', () => {
+  assert.equal(
+    directoryListSource(
+      'https://raw.githubusercontent.com/bitsocialnet/lists/master/5chan-directories/5chan-directories-defaults.json',
+      'f',
+    ),
+    'https://raw.githubusercontent.com/bitsocialnet/lists/master/5chan-directories/5chan-f-directory.json',
+  );
+  assert.equal(
+    directoryListSource('/config/seedit-directories/seedit-directories-defaults.json', 'memes'),
+    '/config/seedit-directories/seedit-memes-directory.json',
+  );
+  assert.equal(directoryListSource('5chan-directories-defaults.json', 'b'), '5chan-b-directory.json');
+});
+
+test('directoryListSource refuses a source that is not a defaults file', () => {
+  assert.equal(directoryListSource('/config/communities.json', 'f'), null);
+  assert.equal(directoryListSource('', 'f'), null);
+});
+
+test('parseDirectoryDefaults reads features.safeForWork per directory code', () => {
+  const defaults = parseDirectoryDefaults({
+    directories: {
+      '3': { directoryCode: '3', features: { safeForWork: true, noSpoilers: true } },
+      f: { directoryCode: 'f', features: { safeForWork: false } },
+      // Stated as something other than a boolean, or not stated at all: no verdict.
+      q: { directoryCode: 'q', features: { safeForWork: 'false' } },
+      trash: { directoryCode: 'trash', features: { postsPerPage: 15 } },
+      bare: { directoryCode: 'bare' },
+    },
+  });
+  assert.deepEqual([...defaults], [['3', true], ['f', false]]);
+});
+
+test('parseDirectoryDefaults survives a file that is not a defaults file', () => {
+  for (const data of [null, [], {}, { directories: 'nope' }, { directories: { f: null } }]) {
+    assert.equal(parseDirectoryDefaults(data).size, 0);
+  }
+});
+
+test('resolveDirectorySafeForWork joins the defaults onto every listed address', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'indexer-directories-'));
+  test.after(() => rmSync(dir, { recursive: true, force: true }));
+  const write = (name: string, data: unknown) => writeFileSync(join(dir, name), JSON.stringify(data));
+  const defaults = join(dir, '5chan-directories-defaults.json');
+
+  write('5chan-directories-defaults.json', {
+    directories: {
+      f: { directoryCode: 'f', features: { safeForWork: false } },
+      '3': { directoryCode: '3', features: { safeForWork: true } },
+      // A code whose sibling list is missing must not sink the others.
+      gone: { directoryCode: 'gone', features: { safeForWork: false } },
+      // A directory that states nothing contributes nothing, list or no list.
+      trash: { directoryCode: 'trash', features: {} },
+    },
+  });
+  write('5chan-f-directory.json', { boards: [{ address: 'flash-posting.bso' }, { address: 'flash-two.bso' }] });
+  write('5chan-3-directory.json', { boards: [{ address: '3dcg.bso' }] });
+  write('5chan-trash-directory.json', { boards: [{ address: 'off-topic.bso' }] });
+
+  const entries = await resolveDirectorySafeForWork(defaults);
+  assert.deepEqual(
+    entries.sort((a, b) => a.address.localeCompare(b.address)),
+    [
+      { address: '3dcg.bso', safeForWork: true },
+      { address: 'flash-posting.bso', safeForWork: false },
+      { address: 'flash-two.bso', safeForWork: false },
+    ],
+  );
+});
+
+test('resolveDirectorySafeForWork also reads the seedit `communities` shape', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'indexer-directories-'));
+  test.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    join(dir, 'seedit-directories-defaults.json'),
+    JSON.stringify({ directories: { memes: { directoryCode: 'memes', features: { safeForWork: true } } } }),
+  );
+  writeFileSync(
+    join(dir, 'seedit-memes-directory.json'),
+    JSON.stringify({ directoryCode: 'memes', communities: [{ address: 'memes.bso', publicKey: '12D3Koo' }] }),
+  );
+
+  assert.deepEqual(await resolveDirectorySafeForWork(join(dir, 'seedit-directories-defaults.json')), [
+    { address: 'memes.bso', safeForWork: true },
+  ]);
+});
+
+test('resolveDirectorySafeForWork stays silent when unconfigured or unreadable', async () => {
+  assert.deepEqual(await resolveDirectorySafeForWork(''), []);
+  assert.deepEqual(await resolveDirectorySafeForWork('/nonexistent/5chan-directories-defaults.json'), []);
 });
 
 test('mapComment groups legacy publications under the configured canonical address', () => {

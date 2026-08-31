@@ -27,6 +27,14 @@ export const config = {
   communities: list(process.env.COMMUNITIES),
   communitiesSource: process.env.COMMUNITIES_SOURCE ?? '',
 
+  /**
+   * A Bitsocial client's `*-directories-defaults.json`, which states
+   * `features.safeForWork` once per directory code. Read together with the
+   * sibling per-directory address lists to answer for communities whose owner
+   * never set the feature themselves. Empty = no directory signal.
+   */
+  directoryDefaultsSource: process.env.DIRECTORY_DEFAULTS_SOURCE ?? '',
+
   crawlIntervalMs: Number(process.env.CRAWL_INTERVAL_MS ?? 60_000),
 
   /** Maximum communities crawled at once. */
@@ -40,8 +48,8 @@ export const config = {
 
   /**
    * Operator NSFW overrides: path to a JSON file naming communities this
-   * instance must treat as NSFW (or explicitly not NSFW, to correct a bad
-   * inference). Empty = no overrides. See src/nsfw.ts.
+   * instance must treat as NSFW (or explicitly not NSFW, to correct a wrong
+   * declaration or inference). Empty = no overrides. See src/nsfw.ts.
    */
   nsfwOverridesSource: process.env.NSFW_OVERRIDES_SOURCE ?? '',
 

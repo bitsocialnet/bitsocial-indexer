@@ -22,3 +22,11 @@ export const brandUrl = process.env.BRAND_URL ?? '';
  * Unset = the page says requests are handled by the instance operator.
  */
 export const contactEmail = process.env.CONTACT_EMAIL ?? '';
+
+/**
+ * Whether this instance's search returns NSFW results. `false` (the default)
+ * matches the API's own safe default; an archive of boards that are NSFW by
+ * design sets SHOW_NSFW=true. The UI always sends the value explicitly, so a
+ * deployment decides this rather than inheriting whatever the API defaults to.
+ */
+export const showNsfw = process.env.SHOW_NSFW === 'true';

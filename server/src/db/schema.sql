@@ -9,9 +9,13 @@ CREATE TABLE IF NOT EXISTS communities (
   description      TEXT,
   added_at         INTEGER NOT NULL,           -- unix seconds
   last_indexed_at  INTEGER,
-  -- Resolved NSFW flag. The protocol has no community.features.nsfw, so the
-  -- indexer derives it from three signals (operator override > directory list >
-  -- inference from flagged comments) — see applyNsfwSignals in db/index.ts.
+  -- The protocol's own community.features.safeForWork, as the last crawl saw
+  -- it. Optional on the wire, so three-state here too: 1 = declared safe for
+  -- work, 0 = declared NSFW, NULL = the owner never declared either way.
+  safe_for_work    INTEGER,
+  -- Resolved NSFW flag, derived from four signals (operator override >
+  -- safe_for_work above > directory list > inference from flagged comments) —
+  -- see resolveNsfw / applyNsfwSignals in db/index.ts.
   nsfw             INTEGER NOT NULL DEFAULT 0
 );
 

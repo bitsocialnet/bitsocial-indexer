@@ -6,7 +6,13 @@
  * the indexer serves an empty index — the dev decides what to index.
  */
 import { config, hasConfiguredCommunities } from '../config.js';
-import { applyNsfwSignals, insertComments, setNsfwList, upsertCommunity, type CommentInput } from '../db/index.js';
+import {
+  applyNsfwSignals,
+  insertComments,
+  setDirectorySafeForWork,
+  upsertCommunity,
+  type CommentInput,
+} from '../db/index.js';
 import { getPkcClient, resetPkcClient } from '../pkc/client.js';
 import { due, enqueue, markFailed, markRunning, markSuccess, reclaimAbandoned } from './queue.js';
 
@@ -46,63 +52,120 @@ export async function runWithConcurrency<T>(
   );
 }
 
-export interface ConfiguredCommunity {
-  address: string;
-  /**
-   * The list's own NSFW verdict, when it states one. Bitsocial directory lists
-   * carry an optional `nsfw` boolean per entry (the same field seedit's client
-   * normalises); absent means the list has no opinion and the indexer falls
-   * back to inferring from content.
-   */
-  nsfw?: boolean;
-}
-
-/**
- * Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list.
- * Inline entries are addresses only, so a duplicate keeps the list entry's
- * metadata — an operator naming a community in both places still gets the
- * list's `nsfw` flag.
- */
-export async function resolveCommunities(): Promise<ConfiguredCommunity[]> {
-  const found = new Map<string, ConfiguredCommunity>();
-  for (const address of config.communities) found.set(address, { address });
+/** Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list. */
+export async function resolveCommunities(): Promise<string[]> {
+  const found = new Set<string>(config.communities);
   if (config.communitiesSource) {
     try {
-      const list = await loadSource(config.communitiesSource);
-      for (const item of list) {
-        const entry = parseCommunityEntry(item);
-        if (entry) found.set(entry.address, entry);
+      for (const item of await loadSource(config.communitiesSource)) {
+        const address = parseCommunityEntry(item);
+        if (address) found.add(address);
       }
     } catch (err) {
       console.error(`[crawler] failed to load COMMUNITIES_SOURCE (${config.communitiesSource}):`, err);
     }
   }
-  return [...found.values()];
+  return [...found];
 }
 
-/** One entry of a community list: a bare address, or an object carrying flags. */
-export function parseCommunityEntry(item: unknown): ConfiguredCommunity | null {
-  if (typeof item === 'string') return item.trim() ? { address: item.trim() } : null;
+/** One entry of a community list: a bare address, or an object carrying one. */
+export function parseCommunityEntry(item: unknown): string | null {
+  if (typeof item === 'string') return item.trim() || null;
   if (!item || typeof item !== 'object' || !('address' in item)) return null;
-  const o = item as { address: unknown; nsfw?: unknown };
-  const address = String(o.address).trim();
-  if (!address) return null;
-  // Only a real boolean counts as a verdict, matching how the seedit client
-  // normalises these lists: anything else leaves the signal unset.
-  return typeof o.nsfw === 'boolean' ? { address, nsfw: o.nsfw } : { address };
+  return String((item as { address: unknown }).address).trim() || null;
 }
 
-/** A community source is either an http(s) URL or a local file path. */
+/** A JSON source is either an http(s) URL or a local file path. */
+async function loadJson(source: string): Promise<unknown> {
+  if (/^https?:\/\//.test(source)) return (await fetch(source)).json();
+  const { readFile } = await import('node:fs/promises');
+  return JSON.parse(await readFile(source, 'utf8'));
+}
+
+/** Address entries of a list file: `["a.bso", …]` or `{ communities|boards: [...] }`. */
 async function loadSource(source: string): Promise<unknown[]> {
-  let data: unknown;
-  if (/^https?:\/\//.test(source)) {
-    data = await (await fetch(source)).json();
-  } else {
-    const { readFile } = await import('node:fs/promises');
-    data = JSON.parse(await readFile(source, 'utf8'));
+  const data = await loadJson(source);
+  if (Array.isArray(data)) return data;
+  const o = data as { communities?: unknown; boards?: unknown } | null;
+  for (const entries of [o?.communities, o?.boards]) if (Array.isArray(entries)) return entries;
+  return [];
+}
+
+// ── directory-level safeForWork ──────────────────────────────────────────────
+
+/**
+ * A community declares `features.safeForWork` itself, but many never do — and a
+ * Bitsocial client already knows the answer for those from its directory lists.
+ * 5chan states it once per *directory*, in `<prefix>-directories-defaults.json`
+ * under `directories.<code>.features.safeForWork`; the per-directory files hold
+ * only candidate addresses. So the join is: read the defaults, then read each
+ * code's address list and hand every address in it that directory's verdict.
+ *
+ * The sibling file name is the convention the bitsocialnet/lists repo documents
+ * — `5chan-directories/5chan-directories-defaults.json` sits next to
+ * `5chan-directories/5chan-<code>-directory.json` — so pointing
+ * DIRECTORY_DEFAULTS_SOURCE at the defaults file is enough to reach both.
+ */
+export interface DirectorySafeForWork {
+  address: string;
+  safeForWork: boolean;
+}
+
+const DEFAULTS_SUFFIX = '-directories-defaults.json';
+
+/** One address-list fetch per directory code — 5chan currently has 64 of them. */
+const DIRECTORY_CONCURRENCY = 8;
+
+/** Where one directory code's address list sits, given the defaults source. */
+export function directoryListSource(defaultsSource: string, code: string): string | null {
+  const cut = defaultsSource.lastIndexOf('/') + 1;
+  const base = defaultsSource.slice(cut);
+  if (!base.endsWith(DEFAULTS_SUFFIX)) return null;
+  return `${defaultsSource.slice(0, cut)}${base.slice(0, -DEFAULTS_SUFFIX.length)}-${code}-directory.json`;
+}
+
+/** Read `directories.<code>.features.safeForWork` out of a defaults file. */
+export function parseDirectoryDefaults(data: unknown): Map<string, boolean> {
+  const found = new Map<string, boolean>();
+  const directories = (data as { directories?: unknown } | null)?.directories;
+  if (!directories || typeof directories !== 'object') return found;
+  for (const [code, entry] of Object.entries(directories as Record<string, unknown>)) {
+    const safeForWork = (entry as { features?: { safeForWork?: unknown } } | null)?.features?.safeForWork;
+    // Only a real boolean is a verdict — exactly how 5chan reads this field.
+    // A directory that states nothing leaves its addresses to inference.
+    if (typeof safeForWork === 'boolean') found.set(code, safeForWork);
   }
-  // Accept ["a.bso", …] or { communities: [...] }.
-  return Array.isArray(data) ? data : ((data as { communities?: unknown[] }).communities ?? []);
+  return found;
+}
+
+/** Join DIRECTORY_DEFAULTS_SOURCE's per-code verdicts onto community addresses. */
+export async function resolveDirectorySafeForWork(
+  source = config.directoryDefaultsSource,
+): Promise<DirectorySafeForWork[]> {
+  if (!source) return [];
+  let defaults: Map<string, boolean>;
+  try {
+    defaults = parseDirectoryDefaults(await loadJson(source));
+  } catch (err) {
+    console.error(`[crawler] failed to load DIRECTORY_DEFAULTS_SOURCE (${source}):`, err);
+    return [];
+  }
+
+  const entries: DirectorySafeForWork[] = [];
+  await runWithConcurrency([...defaults], DIRECTORY_CONCURRENCY, async ([code, safeForWork]) => {
+    const listSource = directoryListSource(source, code);
+    if (!listSource) return;
+    try {
+      for (const item of await loadSource(listSource)) {
+        const address = parseCommunityEntry(item);
+        if (address) entries.push({ address, safeForWork });
+      }
+    } catch (err) {
+      // One unreachable directory file must not cost the others their verdict.
+      console.error(`[crawler] directory ${code}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  return entries;
 }
 
 // ── mapping: pkc-js comment → CommentInput ───────────────────────────────────
@@ -225,11 +288,24 @@ async function indexCommunity(address: string): Promise<number> {
     title: community?.title ?? null,
     description: community?.description ?? null,
     last_indexed_at: crawledAt,
+    // The owner's own declaration, and the strongest signal after an operator
+    // override. Written only when the community actually resolved, so a failed
+    // lookup cannot erase the last one; `null` here is a real observation —
+    // this owner has set no `safeForWork` — not a missing value.
+    ...(community ? { safe_for_work: readSafeForWork(community) } : {}),
   });
   // Newly indexed comments can change the inferred signal, so re-resolve the
   // NSFW verdict for every community this pass could have affected.
   applyNsfwSignals();
   return inserted;
+}
+
+/** `community.features.safeForWork` as the three-state flag the protocol defines. */
+export function readSafeForWork(community: any): number | null {
+  const safeForWork = community?.features?.safeForWork;
+  // Only a real boolean is a declaration: pkc-js types the field
+  // `z.boolean().optional()` with no default, so anything else means unset.
+  return typeof safeForWork === 'boolean' ? Number(safeForWork) : null;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -273,13 +349,15 @@ export async function startCrawler(): Promise<void> {
   }
   const communities = await resolveCommunities();
   console.log(`[crawler] scheduling ${communities.length} communities`);
-  for (const { address } of communities) {
+  for (const address of communities) {
     upsertCommunity({ address, added_at: nowSec() });
     enqueue(address);
   }
-  // The list's own NSFW flags outrank inference, so apply them before the first
+  // The directory verdicts outrank inference, so apply them before the first
   // pass rather than after it.
-  setNsfwList(communities);
+  const directory = await resolveDirectorySafeForWork();
+  if (directory.length) console.log(`[crawler] ${directory.length} addresses carry a directory safeForWork verdict`);
+  setDirectorySafeForWork(directory);
   const reclaimed = reclaimAbandoned();
   if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
   console.log(

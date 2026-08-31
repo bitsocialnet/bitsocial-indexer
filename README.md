@@ -84,6 +84,7 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 | `CRAWL_TIMEOUT_MS` | `300000` | Hard timeout for one community crawl; a timeout resets the RPC client |
 | `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). An entry may contain `*` as a wildcard, e.g. `https://*.seedit.localhost` matches every branch-scoped dev origin. `CORS_ORIGIN` is accepted as a legacy fallback. |
 | `BLOCKLIST_SOURCE` | _(empty)_ | Path to a JSON file of CIDs to take down (operator blocklist, see below). |
+| `DIRECTORY_DEFAULTS_SOURCE` | _(empty)_ | URL/path to a client's `*-directories-defaults.json`, which states `features.safeForWork` per directory code (see below). |
 | `NSFW_OVERRIDES_SOURCE` | _(empty)_ | Path to a JSON file of operator NSFW verdicts per community (see below). |
 
 If neither `COMMUNITIES` nor `COMMUNITIES_SOURCE` is set, the crawler stays
@@ -107,24 +108,52 @@ moderation, and they stay redacted across re-crawls. The bundled web UI shows
 them as `[removed — takedown request]` and documents the policy on its
 `/legal` page (see `CONTACT_EMAIL` below).
 
-#### NSFW communities (`NSFW_OVERRIDES_SOURCE`)
+#### NSFW communities
 
-The protocol has `comment.nsfw` on individual posts but no
-`community.features.nsfw`, so a client cannot ask the network whether a whole
-community is NSFW — the indexer is the place that knows. Each indexed community
-gets an `nsfw` flag on `GET /api/communities` (and `/api/communities/:address`),
-resolved from three signals, **highest precedence first**:
+A community declares its own status through the protocol:
+`community.features.safeForWork` is an **optional** boolean, so it has three
+states — `true`, `false`, and never set. `safeForWork === false` is the
+owner-declared way of saying "this community is NSFW".
+
+Each indexed community gets both the raw declaration (`safe_for_work`: `1`, `0`
+or `null`) and a resolved `nsfw` flag on `GET /api/communities` (and
+`/api/communities/:address`). The resolution takes four signals, **highest
+precedence first**:
 
 1. **Operator override** — `NSFW_OVERRIDES_SOURCE`, a JSON file where each entry
    is a bare address or `{ "address": "…", "nsfw": false, "reason": "…" }`.
    `nsfw` defaults to `true`, and an explicit `false` clears the flag, so a bad
-   inference is correctable. Like the blocklist, the file is re-read whenever it
+   verdict is correctable. Like the blocklist, the file is re-read whenever it
    changes — no restart needed.
-2. **The configured community list** — an entry in `COMMUNITIES_SOURCE` may
-   carry its own `nsfw` boolean (the field Bitsocial directory lists already
-   define). It is read once, when the crawler schedules the list.
-3. **Inference from content** — any indexed comment in the community carrying
+2. **`community.features.safeForWork`** — the owner's own declaration, read off
+   the community on every crawl. `false` → NSFW, `true` → not, unset → the next
+   signal decides.
+3. **The directory the address is listed under** — `DIRECTORY_DEFAULTS_SOURCE`
+   (below), for the many communities whose owner never set the feature.
+4. **Inference from content** — any indexed comment in the community carrying
    the protocol's `nsfw` flag means the community accepts NSFW content.
+
+An unset `safeForWork` is never read as either verdict: it falls through, and
+only the last signal (inference) is allowed to answer with a plain boolean.
+
+##### Directory verdicts (`DIRECTORY_DEFAULTS_SOURCE`)
+
+Bitsocial clients state a *directory's* SFW status once, by directory code, in
+their `<prefix>-directories-defaults.json` — this is how 5chan knows `/f/` and
+`/b/` are NSFW while `/3/` and `/a/` are not. The sibling
+`<prefix>-<code>-directory.json` files hold that directory's candidate
+addresses. Point `DIRECTORY_DEFAULTS_SOURCE` at the defaults file and the
+crawler reads both, giving every address listed under a directory that
+directory's `features.safeForWork`:
+
+```
+DIRECTORY_DEFAULTS_SOURCE=https://raw.githubusercontent.com/bitsocialnet/lists/master/5chan-directories/5chan-directories-defaults.json
+```
+
+Sibling file names follow the convention that repo documents, so one setting
+reaches every directory. A directory that states no `safeForWork`, or an address
+in no directory at all, contributes nothing and falls through to inference. Both
+files are read once, when the crawler schedules its communities.
 
 `GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
 anything NSFW — the comment is flagged, or its community is — and `true`
@@ -142,6 +171,7 @@ includes it. Listings (`/api/posts`) and the sitemap are not filtered.
 | `BRAND_TEXT` | _(empty)_ | Optional footer attribution line, e.g. `A Bitsocial Forge product`. Unset = nothing rendered |
 | `BRAND_URL` | _(empty)_ | Makes `BRAND_TEXT` a link |
 | `CONTACT_EMAIL` | _(empty)_ | Contact address for content-removal / takedown requests, shown on the `/legal` archive-policy page. Unset = the page says requests are handled by the instance operator |
+| `SHOW_NSFW` | `false` | Whether this instance's search returns NSFW results. The UI sends the value on every query, so an archive of boards that are NSFW by design opts in with `SHOW_NSFW=true` rather than silently inheriting the API's safe default |
 
 The web UI serves its own `robots.txt` and a `sitemap.xml` **sitemap index**
 (one child sitemap per community, capped at the 5,000 most recent posts each,
@@ -154,7 +184,7 @@ CORS-enabled so browser clients can call it directly.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | Status + index counts |
-| `GET /api/communities` | Indexed communities + post counts + `nsfw` flag |
+| `GET /api/communities` | Indexed communities + post counts + resolved `nsfw` flag + declared `safe_for_work` |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
 | `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&nsfw=` (NSFW excluded by default) |

@@ -12,6 +12,12 @@ export interface Community {
   description: string | null;
   added_at: number;
   last_indexed_at: number | null;
+  /**
+   * The community's own `features.safeForWork`, as the last crawl saw it.
+   * Three-state, like the protocol field: 1 = declared safe for work,
+   * 0 = declared NSFW, NULL = the owner never declared either way.
+   */
+  safe_for_work: number | null;
   /** Resolved NSFW flag — see resolveNsfw / applyNsfwSignals below. */
   nsfw: number;
 }
@@ -154,11 +160,17 @@ function migrate(database: Database.Database): void {
   addColumns(database, 'crawl_queue', { started_at: 'INTEGER' });
 
   // NSFW tracking. Deliberately its own call: an existing archive gaining only
-  // these columns must not re-run the seen-time backfill above. Both default to
-  // 0 (= not NSFW), so every already-indexed row keeps serving exactly as
-  // before until a signal says otherwise.
+  // these columns must not re-run the seen-time backfill above. The resolved
+  // flags default to 0 (= not NSFW), so every already-indexed row keeps serving
+  // exactly as before until a signal says otherwise, while safe_for_work is
+  // deliberately nullable-with-no-default: on an archive predating it, every
+  // community reads back as "the owner never declared", which is the truth
+  // until a crawl observes the feature.
   addColumns(database, 'comments', { nsfw: 'INTEGER NOT NULL DEFAULT 0' });
-  addColumns(database, 'communities', { nsfw: 'INTEGER NOT NULL DEFAULT 0' });
+  addColumns(database, 'communities', {
+    nsfw: 'INTEGER NOT NULL DEFAULT 0',
+    safe_for_work: 'INTEGER',
+  });
   // Partial index: inference only ever asks which communities have a flagged
   // comment, so indexing the flagged rows alone keeps that a seek instead of a
   // scan of the whole archive. Lives here, not in schema.sql, because that file
@@ -209,15 +221,26 @@ function serve(row: ServedComment): ServedComment {
 
 // ── communities ────────────────────────────────────────────────────────────
 
+/**
+ * Insert or refresh a community row.
+ *
+ * `safe_for_work` cannot use the COALESCE-keeps-the-old-value rule the other
+ * columns use: NULL is a real value there (the owner declared nothing), not a
+ * missing one. So it is written only when the caller passes the key at all —
+ * a crawl that resolved the community states all three outcomes, and merely
+ * scheduling an address leaves the last declaration alone.
+ */
 export function upsertCommunity(c: Pick<Community, 'address'> & Partial<Community>): void {
   getDb()
     .prepare(
-      `INSERT INTO communities (address, title, description, added_at, last_indexed_at)
-       VALUES (@address, @title, @description, @added_at, @last_indexed_at)
+      `INSERT INTO communities (address, title, description, added_at, last_indexed_at, safe_for_work)
+       VALUES (@address, @title, @description, @added_at, @last_indexed_at, @safe_for_work)
        ON CONFLICT(address) DO UPDATE SET
          title = COALESCE(excluded.title, communities.title),
          description = COALESCE(excluded.description, communities.description),
-         last_indexed_at = COALESCE(excluded.last_indexed_at, communities.last_indexed_at)`,
+         last_indexed_at = COALESCE(excluded.last_indexed_at, communities.last_indexed_at),
+         safe_for_work = CASE WHEN @observed_safe_for_work = 1
+           THEN excluded.safe_for_work ELSE communities.safe_for_work END`,
     )
     .run({
       address: c.address,
@@ -225,7 +248,13 @@ export function upsertCommunity(c: Pick<Community, 'address'> & Partial<Communit
       description: c.description ?? null,
       added_at: c.added_at ?? nowSec(),
       last_indexed_at: c.last_indexed_at ?? null,
+      safe_for_work: c.safe_for_work ?? null,
+      observed_safe_for_work: 'safe_for_work' in c ? 1 : 0,
     });
+  // Re-resolve here rather than leaving it to the caller: safe_for_work is the
+  // primary NSFW signal, and a signal that only takes effect when someone
+  // remembers to apply it is the kind of thing that rots silently.
+  if ('safe_for_work' in c) applyNsfwSignals();
 }
 
 export interface CommunitySummary extends Community {
@@ -257,27 +286,44 @@ export function getCommunity(address: string): CommunitySummary | undefined {
 // ── NSFW signals ─────────────────────────────────────────────────────────────
 
 /**
- * The Bitsocial protocol has `comment.nsfw` but no `community.features.nsfw`,
- * so a client cannot ask the network whether a community is NSFW — the indexer
- * has to be the place that knows. Three signals answer it, most authoritative
- * first:
+ * `community.features.safeForWork` is the protocol's own, owner-declared answer
+ * to "is this community NSFW?" — optional, so genuinely three-state. Four
+ * signals resolve one community, most authoritative first:
  *
- *   1. `override` — the operator's own file (NSFW_OVERRIDES_SOURCE, see
- *      ../nsfw.ts). States NSFW *and* not-NSFW, so a bad inference is fixable.
- *   2. `listed`   — the configured community list's own `nsfw` flag
- *      (COMMUNITIES_SOURCE), the field seedit's directory lists already carry.
- *   3. `inferred` — any indexed comment in the community is flagged NSFW, which
- *      means the community accepts NSFW content.
+ *   1. `override`             — the operator's own file (NSFW_OVERRIDES_SOURCE,
+ *      see ../nsfw.ts). States NSFW *and* not-NSFW, so a bad verdict is fixable.
+ *   2. `safeForWork`          — the community's `features.safeForWork`, as the
+ *      crawler last saw it. The owner's own declaration.
+ *   3. `directorySafeForWork` — the `features.safeForWork` of the directory the
+ *      address is listed under (DIRECTORY_DEFAULTS_SOURCE), for a community
+ *      whose owner never set the feature.
+ *   4. `inferred`             — any indexed comment carries the protocol's
+ *      `nsfw` flag, so the community accepts NSFW content.
+ *
+ * Signals 2 and 3 are held in `safeForWork` polarity all the way here, exactly
+ * like 5chan does: `undefined` (never declared) has to stay distinguishable
+ * from `true`, so it can fall through to the next signal instead of being read
+ * as either verdict.
  */
 export interface NsfwSignals {
   override?: boolean;
-  listed?: boolean;
+  safeForWork?: boolean;
+  directorySafeForWork?: boolean;
   inferred: boolean;
 }
 
+/** The one inversion point: `safeForWork === false` is what "NSFW" means. */
+const notSafeForWork = (safeForWork: boolean | undefined): boolean | undefined =>
+  safeForWork === undefined ? undefined : !safeForWork;
+
 /** Precedence lives here and nowhere else: first signal with an opinion wins. */
 export function resolveNsfw(signals: NsfwSignals): boolean {
-  return signals.override ?? signals.listed ?? signals.inferred;
+  return (
+    signals.override ??
+    notSafeForWork(signals.safeForWork) ??
+    notSafeForWork(signals.directorySafeForWork) ??
+    signals.inferred
+  );
 }
 
 /** Operator override entry: forces one community NSFW or explicitly not-NSFW. */
@@ -287,9 +333,16 @@ export interface NsfwOverride {
   reason: string | null;
 }
 
-/** Active signals 1 and 2, held in memory so either can be replaced on its own. */
+/**
+ * Signals 1 and 3, held in memory so either can be replaced on its own. Signal 2
+ * lives in the communities table instead, written by the crawl that observed it.
+ */
 let nsfwOverrides = new Map<string, boolean>();
-let nsfwListed = new Map<string, boolean>();
+let directorySafeForWork = new Map<string, boolean>();
+
+/** A stored `safe_for_work` cell back as the three-state flag it represents. */
+const storedSafeForWork = (value: number | null): boolean | undefined =>
+  value === null ? undefined : value === 1;
 
 /**
  * Recompute every community's resolved `nsfw` column from the current signals.
@@ -306,9 +359,10 @@ export function applyNsfwSignals(): void {
         .all() as { address: string }[]
     ).map((r) => r.address),
   );
-  const rows = database.prepare('SELECT address, nsfw FROM communities').all() as {
+  const rows = database.prepare('SELECT address, nsfw, safe_for_work FROM communities').all() as {
     address: string;
     nsfw: number;
+    safe_for_work: number | null;
   }[];
   const update = database.prepare('UPDATE communities SET nsfw = @nsfw WHERE address = @address');
 
@@ -316,7 +370,8 @@ export function applyNsfwSignals(): void {
     for (const row of rows) {
       const next = resolveNsfw({
         override: nsfwOverrides.get(row.address),
-        listed: nsfwListed.get(row.address),
+        safeForWork: storedSafeForWork(row.safe_for_work),
+        directorySafeForWork: directorySafeForWork.get(row.address),
         inferred: inferred.has(row.address),
       })
         ? 1
@@ -332,11 +387,16 @@ export function setNsfwOverrides(entries: NsfwOverride[]): void {
   applyNsfwSignals();
 }
 
-/** Apply the `nsfw` flags carried by the configured community list. */
-export function setNsfwList(entries: { address: string; nsfw?: boolean }[]): void {
-  nsfwListed = new Map(
-    entries.filter((e): e is { address: string; nsfw: boolean } => typeof e.nsfw === 'boolean').map((e) => [e.address, e.nsfw]),
-  );
+/**
+ * Apply the directory-level `features.safeForWork` flags, already joined to
+ * addresses (see crawler/crawler.ts). An address listed under two directories
+ * takes the stricter verdict — one NSFW directory is enough to keep it out of a
+ * safe-default search.
+ */
+export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[]): void {
+  const next = new Map<string, boolean>();
+  for (const { address, safeForWork } of entries) next.set(address, (next.get(address) ?? true) && safeForWork);
+  directorySafeForWork = next;
   applyNsfwSignals();
 }
 

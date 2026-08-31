@@ -4,7 +4,7 @@ import test from 'node:test';
 process.env.DB_PATH = ':memory:';
 process.env.ALLOWED_ORIGINS = 'https://5archive.org,https://staging.5archive.org,https://*.seedit.localhost';
 const { buildServer, parseAllowedOrigins } = await import('./server.js');
-const { insertComments, setBlocklist, setNsfwList, upsertCommunity } = await import('../db/index.js');
+const { insertComments, setBlocklist, setDirectorySafeForWork, upsertCommunity } = await import('../db/index.js');
 
 const app = await buildServer();
 test.after(() => app.close());
@@ -175,7 +175,7 @@ test('search rejects a non-boolean nsfw parameter', async () => {
 test('communities expose the resolved nsfw flag', async () => {
   upsertCommunity({ address: 'api-adult.bso', last_indexed_at: 1 });
   upsertCommunity({ address: 'api-sfw.bso', last_indexed_at: 1 });
-  setNsfwList([{ address: 'api-adult.bso', nsfw: true }]);
+  setDirectorySafeForWork([{ address: 'api-adult.bso', safeForWork: false }]);
 
   const one = await app.inject({ method: 'GET', url: '/api/communities/api-adult.bso' });
   assert.equal(one.statusCode, 200);
@@ -186,9 +186,45 @@ test('communities expose the resolved nsfw flag', async () => {
   assert.equal(communities.find((c) => c.address === 'api-adult.bso')?.nsfw, 1);
   assert.equal(communities.find((c) => c.address === 'api-sfw.bso')?.nsfw, 0);
 
-  setNsfwList([]);
+  setDirectorySafeForWork([]);
   const cleared = await app.inject({ method: 'GET', url: '/api/communities/api-adult.bso' });
-  assert.equal((cleared.json() as { nsfw: number }).nsfw, 0, 'dropping the list entry drops the flag');
+  assert.equal((cleared.json() as { nsfw: number }).nsfw, 0, 'dropping the directory verdict drops the flag');
+});
+
+test('communities expose the crawled safeForWork alongside the resolved flag', async () => {
+  upsertCommunity({ address: 'api-declared.bso', last_indexed_at: 1, safe_for_work: 0 });
+
+  const declared = await app.inject({ method: 'GET', url: '/api/communities/api-declared.bso' });
+  const body = declared.json() as { safe_for_work: number | null; nsfw: number };
+  assert.equal(body.safe_for_work, 0, "the owner's own declaration is served as-is");
+  assert.equal(body.nsfw, 1, 'and resolves to NSFW without any other signal');
+
+  // A community nobody has declared for reads back as unset, not as false.
+  const unset = await app.inject({ method: 'GET', url: '/api/communities/api-sfw.bso' });
+  assert.equal((unset.json() as { safe_for_work: number | null }).safe_for_work, null);
+});
+
+test('search drops results from a community whose owner declared it NSFW', async () => {
+  upsertCommunity({ address: 'api-declared.bso', last_indexed_at: 1, safe_for_work: 0 });
+  insertComments([
+    {
+      cid: 'api-declared-op',
+      community_address: 'api-declared.bso',
+      post_cid: 'api-declared-op',
+      depth: 0,
+      timestamp: 1,
+      content: 'tame quokka',
+    },
+  ]);
+
+  const byDefault = await app.inject({ method: 'GET', url: '/api/search?q=quokka' });
+  assert.equal((byDefault.json() as { total: number }).total, 0, 'the comment itself is not flagged; its community is');
+  const optedIn = await app.inject({ method: 'GET', url: '/api/search?q=quokka&nsfw=true' });
+  assert.equal((optedIn.json() as { total: number }).total, 1);
+
+  // Listings stay unfiltered — only search takes a side.
+  const listed = await app.inject({ method: 'GET', url: '/api/posts?community=api-declared.bso' });
+  assert.equal((listed.json() as { total: number }).total, 1);
 });
 
 test('API never serves pending-approval comments', async () => {

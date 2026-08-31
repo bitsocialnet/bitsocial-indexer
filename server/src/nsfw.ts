@@ -2,10 +2,11 @@
  * Operator NSFW overrides (NSFW_OVERRIDES_SOURCE): a JSON file that decides,
  * for named communities, whether this instance treats them as NSFW.
  *
- * It is the highest-precedence of the three signals (see resolveNsfw in db/)
- * because the other two can be wrong: a directory list may not say anything,
- * and inference from a single flagged comment can mislabel an otherwise
- * safe-for-work community. So an override states NSFW *and* not-NSFW.
+ * It is the highest-precedence of the four signals (see resolveNsfw in db/)
+ * because the other three can be wrong: a community owner can leave
+ * `features.safeForWork` unset or lie about it, a directory list may not cover
+ * the address, and inference from a single flagged comment can mislabel an
+ * otherwise safe-for-work community. So an override states NSFW *and* not-NSFW.
  *
  * File format — an array where each entry is a bare address or an object:
  *
@@ -14,7 +15,7 @@
  * `nsfw` defaults to true (marking a community NSFW is the common case). The
  * file is applied at startup and re-applied whenever its mtime changes (polled
  * every 30s) — no restart needed. Removing an entry (or the whole file) hands
- * the community back to the directory-list and inference signals.
+ * the community back to the safeForWork, directory-list and inference signals.
  */
 import { readFile, stat } from 'node:fs/promises';
 import { config } from './config.js';

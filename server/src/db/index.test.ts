@@ -9,7 +9,7 @@ const {
   listPosts,
   searchPosts,
   setBlocklist,
-  setNsfwList,
+  setDirectorySafeForWork,
   stats,
   upsertCommunity,
 } = await import('./index.js');
@@ -286,12 +286,12 @@ test('search excludes every result from an NSFW community, flagged or not', () =
   insertComments([makeComment({ cid: 'nsfw-com-op', community_address: community, content: 'tame gerenuk' })]);
   assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 1);
 
-  setNsfwList([{ address: community, nsfw: true }]);
+  setDirectorySafeForWork([{ address: community, safeForWork: false }]);
   assert.equal(getCommunity(community)?.nsfw, 1);
   assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 0);
   assert.equal(searchPosts({ q: 'gerenuk', nsfw: true }).total, 1);
 
-  setNsfwList([]);
+  setDirectorySafeForWork([]);
   assert.equal(searchPosts({ q: 'gerenuk', nsfw: false }).total, 1);
 });
 
