@@ -1,0 +1,43 @@
+name: build-and-push
+
+# Publishes the engine's server image to GHCR so instances pull a pinned tag
+# instead of cloning this repo at build time. Every push to master refreshes
+# `latest` and a short-sha tag; a `v*` tag publishes that version. Instances
+# should pin the version tag.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/bitsocialnet/bitsocial-indexer
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          # The image is the API + crawler only; the webui is deployed separately.
+          context: ./server
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
