@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { CID } from 'multiformats/cid';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -461,8 +462,13 @@ export interface PostPage {
   total: number;
 }
 
-function buildFilters(o: ListOpts): { where: string[]; params: Record<string, unknown> } {
-  const where = [VISIBLE];
+/**
+ * The narrowing every listing and search shares. `visibility` is the base row
+ * filter: VISIBLE (no tombstones) for listings and text search, NOT_PENDING for
+ * the one lookup that serves tombstones on purpose (see searchPosts).
+ */
+function buildFilters(o: ListOpts, visibility = VISIBLE): { where: string[]; params: Record<string, unknown> } {
+  const where = [visibility];
   const params: Record<string, unknown> = {};
   if (!o.includeReplies) where.push('c.depth = 0');
   if (o.nsfw === false) where.push(NOT_NSFW);
@@ -693,19 +699,61 @@ function buildSearchFilters(o: SearchFilters): { where: string[]; params: Record
   return { where, params };
 }
 
+/**
+ * `q` when the whole of it is one CID, in canonical string form; undefined for
+ * anything else. A comment CID pasted into a search box is one long opaque
+ * token the FTS index can never match, so searchPosts looks it up by
+ * `comments.cid` instead. Recognised by parsing, not by pattern: CIDv0 (`Qm…`,
+ * base58btc) and CIDv1 (`bafy…` base32, plus the `z…`/`k…` multibase forms) are
+ * accepted by structure — alphabet, varints, digest length — so an ordinary
+ * word never is (checked against a 236k-word dictionary: no hits). The
+ * mixed-input rule is deliberately strict: a CID with other words around it is
+ * a text search, exactly as before. A CID names one comment, so extra words
+ * could only narrow it to nothing, and guessing which half the user meant would
+ * make the answer depend on the tokenizer. The canonical form is what the
+ * network hands the crawler and so what is stored, hence what is compared —
+ * the same CID typed in another multibase (`z…`) still finds it.
+ */
+function parseCid(q: string | undefined): string | undefined {
+  const raw = q?.trim();
+  if (!raw || /\s/.test(raw)) return undefined;
+  try {
+    return CID.parse(raw).toString();
+  } catch {
+    return undefined;
+  }
+}
+
 export function searchPosts(o: ListOpts & SearchFilters & { q?: string }): PostPage {
-  const match = toMatch(o);
+  const cid = parseCid(o.q);
+  // A CID is not text: it takes q's place as an exact `comments.cid` term and
+  // never reaches the FTS index. `selftext` still does, and still narrows.
+  const match = toMatch({ q: cid ? undefined : o.q, selftext: o.selftext });
   const filters = buildSearchFilters(o);
   // Nothing to search on. `community`/`time`/`nsfw` narrow a search rather than
   // being one, so they still land here — but any content filter makes an empty
   // `q` a real query, which is what `author:lena.bso` with no words has to mean.
-  if (!match && filters.where.length === 0) return { posts: [], page: 1, limit: o.limit ?? 25, total: 0 };
+  if (!cid && !match && filters.where.length === 0) return { posts: [], page: 1, limit: o.limit ?? 25, total: 0 };
 
   const limit = Math.min(Math.max(o.limit ?? 25, 1), 100);
   const page = Math.max(o.page ?? 1, 1);
   const offset = (page - 1) * limit;
 
-  const { where, params } = buildFilters(o);
+  // Text search hides tombstones: they have no content to match. A comment
+  // asked for by its CID is served the way /api/posts/:cid serves it — the same
+  // NOT_PENDING filter, the same `serve` redaction — so pending-approval rows
+  // never appear and a removed/deleted/taken-down one comes back as its
+  // tombstone: the answer to "this exact comment" is "removed", not "no such
+  // comment". Only for the bare lookup, though. `author`/`site`/`url`/`self`/
+  // `selftext` compare columns the tombstone redacts, and a yes/no answer over
+  // redacted content would be a side channel around the blocklist, so with any
+  // of them set tombstones stay hidden exactly as in text search.
+  const bare = cid !== undefined && !match && filters.where.length === 0;
+  const { where, params } = buildFilters(o, bare ? NOT_PENDING : VISIBLE);
+  if (cid) {
+    where.push('c.cid = @cid');
+    params.cid = cid;
+  }
   // One AND-ed list: every filter narrows the previous ones instead of
   // replacing them, and the same list is reused for the total.
   where.push(...filters.where);

@@ -1,3 +1,5 @@
+import { base58btc } from 'multiformats/bases/base58';
+import { CID } from 'multiformats/cid';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -461,4 +463,69 @@ test('search: filters alone are a query, but no filters and no q are not', () =>
   assert.equal(searchPosts({ site: 'other.test' }).total, 1);
   assert.equal(searchPosts({ url: 'ink-study', self: 'no' }).total, 4);
   assert.equal(searchPosts({ author: 'mixa.bso', self: 'yes' }).total, 0);
+});
+
+// ── search by CID ────────────────────────────────────────────────────────────
+
+test('search: a CID names the stored comment, not the rows that reference it', () => {
+  const ghost = 'QmbEqHPax4wzdfU38Fy1udLpVk8RhbMpAz5jnJW986iD7x'; // never indexed
+  const reply = 'Qmd3qMs7SQ73khYL9pEvmSK2YQrWEWNwPtuNBr6EgyK28h';
+  insertComments([makeComment({ cid: reply, post_cid: ghost, parent_cid: ghost, depth: 1, title: null, content: 'orphaned wombat' })]);
+
+  assert.equal(searchPosts({ q: reply, includeReplies: true }).total, 1);
+  assert.equal(searchPosts({ q: ghost, includeReplies: true }).total, 0, 'a post_cid/parent_cid-only CID was never archived');
+  assert.equal(getThread(ghost), null, 'consistent with the thread endpoint');
+});
+
+test('search: a CID lookup composes with the filters, and serves tombstones only bare', () => {
+  const cid = 'QmfTQPdzDNWFdR2NTpgQTQxKxVKuPuHaEoDErrz7vnnvtd';
+  const original = makeComment({
+    cid,
+    author_address: 'wren.bso',
+    content: 'filtered wren',
+    link: 'https://example.com/nest',
+    timestamp: now - 2 * 86_400,
+  });
+  insertComments([original]);
+
+  assert.equal(searchPosts({ q: cid }).total, 1);
+  assert.equal(searchPosts({ q: cid, author: 'wren.bso' }).total, 1);
+  assert.equal(searchPosts({ q: cid, author: 'lark.bso' }).total, 0, 'author narrows');
+  assert.equal(searchPosts({ q: cid, selftext: 'wren' }).total, 1);
+  assert.equal(searchPosts({ q: cid, selftext: 'lark' }).total, 0, 'selftext narrows');
+  assert.equal(searchPosts({ q: cid, site: 'example.com', self: 'no' }).total, 1);
+  assert.equal(searchPosts({ q: cid, self: 'yes' }).total, 0, 'self narrows');
+  assert.equal(searchPosts({ q: cid, community: COMMUNITY }).total, 1);
+  assert.equal(searchPosts({ q: cid, community: 'elsewhere.bso' }).total, 0, 'community narrows');
+  assert.equal(searchPosts({ q: cid, time: 'week' }).total, 1);
+  assert.equal(searchPosts({ q: cid, time: 'day' }).total, 0, 'time narrows');
+
+  insertComments([{ ...original, removed: true }]);
+  const bare = searchPosts({ q: cid });
+  assert.equal(bare.total, 1, 'the bare lookup serves the tombstone');
+  assert.equal(bare.posts[0]?.removed, 1);
+  assert.equal(bare.posts[0]?.content, null);
+  assert.equal(bare.posts[0]?.author_address, null);
+  assert.equal(searchPosts({ q: cid, author: 'wren.bso' }).total, 0, 'but no filter may answer over redacted columns');
+  assert.equal(searchPosts({ q: cid, site: 'example.com' }).total, 0);
+  assert.equal(searchPosts({ q: cid, selftext: 'wren' }).total, 0);
+  assert.equal(searchPosts({ q: cid, community: COMMUNITY }).total, 1, 'what the tombstone shows anyway still narrows');
+});
+
+test('search: the CID key is the CID, not the string it was typed as', () => {
+  const cid = 'bafkreib22pq7c2lyqszbdatdv2ukus5ryaswzibozm5uyf2bhiwr3rg3fy';
+  insertComments([makeComment({ cid, content: 'canonical hoopoe' })]);
+  const base58 = CID.parse(cid).toString(base58btc); // the same CID in another multibase
+  assert.notEqual(base58, cid);
+  assert.equal(searchPosts({ q: base58 }).posts[0]?.cid, cid);
+  assert.equal(searchPosts({ q: ` ${cid} ` }).total, 1, 'surrounding whitespace is trimmed');
+});
+
+test('search: a CID hit keeps total, page and limit consistent', () => {
+  const cid = 'QmSZ71aZ4K82Xhy4zVNeDxzcmPVDgzWVDPgLJVgZpp9Csu';
+  insertComments([makeComment({ cid, content: 'paged dunnart' })]);
+  const first = searchPosts({ q: cid, limit: 5 });
+  assert.deepEqual([first.total, first.page, first.limit, first.posts.length], [1, 1, 5, 1]);
+  const second = searchPosts({ q: cid, limit: 5, page: 2 });
+  assert.deepEqual([second.total, second.page, second.limit, second.posts.length], [1, 2, 5, 0], 'page 2 of one hit is empty but still counts it');
 });

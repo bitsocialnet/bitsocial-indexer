@@ -323,3 +323,184 @@ test('search rejects an unknown self value and drops unknown parameters', async 
   assert.equal(unknown.statusCode, 200);
   assert.equal((unknown.json() as { total: number }).total, 3);
 });
+
+// ── search by CID ────────────────────────────────────────────────────────────
+
+// Real CIDs (sha2-256 of fixture strings): the lookup is gated on parsing, so
+// the placeholder cids the tests above use can never reach it.
+const CID_OP = 'QmabF7Ayiu6Gb4P6cQmSk5duaNmYKFYQPt1Vs7s7kbVqAt';
+const CID_REPLY = 'bafkreiae5me4knhhkqsxjj5y5ydkarontx5opxfpjrrplxqbbuyrexig4e';
+const CID_UNKNOWN = 'Qmdf1E29f8rEDKqdw67H4Q6ZmzoCzHnuBWKXpL3e9k5Ssa';
+const CID_PENDING = 'QmTQdrxFPKuShDZMvodDUrdTfZdcDes4d5cGCpnBiadzQP';
+const CID_REMOVED = 'QmZE94S83gfqpQxLD11zBM9H3yT7kuPdePnn6BCJmza4w3';
+const CID_TAKEDOWN = 'QmWoCtQy3ebbVvKAo1ohCKLBwWe5MqsVhDLnQEY342GM22';
+const CID_NSFW = 'QmQv3QpsWqHQbLgrWWJJVnE7YFY5RCpZSivizYjYGS1Hdu';
+
+const searchTotal = async (query: string): Promise<number> => {
+  const res = await app.inject({ method: 'GET', url: `/api/search?${query}` });
+  assert.equal(res.statusCode, 200, query);
+  return (res.json() as { total: number }).total;
+};
+
+test('search finds a comment by its CIDv0, as an ordinary result', async () => {
+  upsertCommunity({ address: 'api-cid.bso', last_indexed_at: 1 });
+  insertComments([
+    {
+      cid: CID_OP,
+      community_address: 'api-cid.bso',
+      post_cid: CID_OP,
+      depth: 0,
+      timestamp: 1,
+      title: 'bristling zebra',
+      content: 'koala Quail caracara',
+    },
+    {
+      cid: CID_REPLY,
+      community_address: 'api-cid.bso',
+      post_cid: CID_OP,
+      parent_cid: CID_OP,
+      depth: 1,
+      timestamp: 2,
+      content: 'a reply, caracara',
+    },
+  ]);
+
+  const res = await app.inject({ method: 'GET', url: `/api/search?q=${CID_OP}` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as {
+    query: string;
+    total: number;
+    page: number;
+    limit: number;
+    posts: { cid: string; title: string | null }[];
+  };
+  assert.equal(body.query, CID_OP);
+  assert.equal(body.total, 1);
+  assert.equal(body.page, 1);
+  assert.equal(body.limit, 25);
+  assert.equal(body.posts.length, 1);
+  assert.equal(body.posts[0]?.cid, CID_OP);
+  assert.equal(body.posts[0]?.title, 'bristling zebra', 'served with its content, like any search hit');
+});
+
+test('search finds a reply by its CIDv1, unless replies are excluded', async () => {
+  const hit = await app.inject({ method: 'GET', url: `/api/search?q=${CID_REPLY}` });
+  const body = hit.json() as { total: number; posts: { cid: string; depth: number }[] };
+  assert.equal(body.total, 1);
+  assert.equal(body.posts[0]?.cid, CID_REPLY);
+  assert.equal(body.posts[0]?.depth, 1);
+  assert.equal(await searchTotal(`q=${CID_REPLY}&replies=false`), 0, 'replies=false narrows a CID lookup too');
+});
+
+test('search by an unknown CID is an empty page, not an error', async () => {
+  const res = await app.inject({ method: 'GET', url: `/api/search?q=${CID_UNKNOWN}` });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { query: CID_UNKNOWN, posts: [], page: 1, limit: 25, total: 0 });
+});
+
+test('search never returns a pending-approval comment by CID', async () => {
+  const row = { cid: CID_PENDING, community_address: 'api-cid.bso', post_cid: CID_PENDING, depth: 0, timestamp: 1, content: 'in the mod queue' };
+  insertComments([{ ...row, pending_approval: true }]);
+  assert.equal(await searchTotal(`q=${CID_PENDING}`), 0, 'mod-queue content is never indexed');
+
+  insertComments([row]);
+  assert.equal(await searchTotal(`q=${CID_PENDING}`), 1);
+  insertComments([{ ...row, pending_approval: true }]);
+  assert.equal(await searchTotal(`q=${CID_PENDING}`), 0, 'and a row sent back to the queue stops being served');
+});
+
+test('search returns a removed comment by CID as the redacted tombstone', async () => {
+  const row = {
+    cid: CID_REMOVED,
+    community_address: 'api-cid.bso',
+    post_cid: CID_REMOVED,
+    depth: 0,
+    timestamp: 1,
+    title: 'secret title',
+    content: 'secret body',
+    author_name: 'someone',
+  };
+  insertComments([row]);
+  insertComments([{ ...row, removed: true, mod_reason: 'spam' }]);
+
+  const res = await app.inject({ method: 'GET', url: `/api/search?q=${CID_REMOVED}` });
+  const body = res.json() as {
+    total: number;
+    posts: { cid: string; removed: number; mod_reason: string | null; title: string | null; content: string | null; author_name: string | null }[];
+  };
+  assert.equal(body.total, 1);
+  const tomb = body.posts[0];
+  assert.equal(tomb?.cid, CID_REMOVED);
+  assert.equal(tomb?.removed, 1);
+  assert.equal(tomb?.mod_reason, 'spam');
+  assert.equal(tomb?.title, null);
+  assert.equal(tomb?.content, null);
+  assert.equal(tomb?.author_name, null);
+
+  const thread = await app.inject({ method: 'GET', url: `/api/posts/${CID_REMOVED}` });
+  assert.deepEqual(tomb, (thread.json() as { post: unknown }).post, 'the very tombstone /api/posts/:cid serves');
+});
+
+test('search returns a taken-down comment by CID as the takedown tombstone, never its content', async () => {
+  insertComments([
+    {
+      cid: CID_TAKEDOWN,
+      community_address: 'api-cid.bso',
+      post_cid: CID_TAKEDOWN,
+      depth: 0,
+      timestamp: 1,
+      title: 'infringing title',
+      content: 'copyrighted body',
+      author_name: 'uploader',
+      link: 'https://example.com/leak',
+    },
+  ]);
+  setBlocklist([{ cid: CID_TAKEDOWN, scope: 'comment', reason: 'DMCA #9' }]);
+
+  const res = await app.inject({ method: 'GET', url: `/api/search?q=${CID_TAKEDOWN}` });
+  const body = res.json() as {
+    total: number;
+    posts: { takedown: number; takedown_reason: string | null; title: string | null; content: string | null; link: string | null }[];
+  };
+  assert.equal(body.total, 1);
+  assert.equal(body.posts[0]?.takedown, 1);
+  assert.equal(body.posts[0]?.takedown_reason, 'DMCA #9');
+  assert.equal(body.posts[0]?.title, null);
+  assert.equal(body.posts[0]?.content, null);
+  assert.equal(body.posts[0]?.link, null);
+
+  // No oracle over the redacted columns: a content filter hides the tombstone
+  // rather than answering yes/no about what it hides.
+  for (const filter of ['url=leak', 'site=example.com', 'author=uploader', 'self=no', 'selftext=copyrighted']) {
+    assert.equal(await searchTotal(`q=${CID_TAKEDOWN}&${filter}`), 0, filter);
+  }
+
+  setBlocklist([]);
+  assert.equal(await searchTotal(`q=${CID_TAKEDOWN}&url=leak`), 1, 'restored content is filterable again');
+});
+
+test('search by CID composes with community', async () => {
+  assert.equal(await searchTotal(`q=${CID_OP}&community=api-cid.bso`), 1);
+  assert.equal(await searchTotal(`q=${CID_OP}&community=api.bso`), 0, 'a CID in another community is not in this one');
+});
+
+test('search by CID still honours the NSFW default', async () => {
+  insertComments([
+    { cid: CID_NSFW, community_address: 'api-cid.bso', post_cid: CID_NSFW, depth: 0, timestamp: 1, content: 'explicit', nsfw: true },
+  ]);
+  assert.equal(await searchTotal(`q=${CID_NSFW}`), 0, 'a pasted CID is not a way around the instance policy');
+  assert.equal(await searchTotal(`q=${CID_NSFW}&nsfw=true`), 1);
+});
+
+test('search treats a CID with other words as text, and leaves word queries alone', async () => {
+  const total = (q: string) => searchTotal(`q=${encodeURIComponent(q)}`);
+  assert.equal(await total(`${CID_OP} caracara`), 0, 'mixed input is a text search, which cannot match a CID');
+  assert.equal(await total(`caracara ${CID_OP}`), 0);
+  assert.equal(await total(CID_OP.slice(0, -1)), 0, 'a truncated CID is not a CID');
+  assert.equal(await total('caracara'), 2, 'an ordinary word query is unaffected');
+  // Words that start like a multibase prefix (Q, b, z, k) are still words.
+  assert.equal(await total('Quail'), 1);
+  assert.equal(await total('bristling'), 1);
+  assert.equal(await total('zebra'), 1);
+  assert.equal(await total('koala'), 1);
+});

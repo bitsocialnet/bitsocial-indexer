@@ -187,7 +187,7 @@ CORS-enabled so browser clients can call it directly.
 | `GET /api/communities` | Indexed communities + post counts + resolved `nsfw` flag + declared `safe_for_work` |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
-| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=`, plus the advanced filters below (NSFW excluded by default) |
+| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=`, plus the advanced filters below (NSFW excluded by default). A `q` that is a comment CID is looked up by CID instead (see below) |
 | `GET /sitemap.xml`, `/robots.txt` | SEO |
 
 ### Advanced search filters
@@ -210,6 +210,23 @@ complete query, answered newest-first since there is no relevance to rank.
 `?community=…` alone is not — narrowing parameters need something to narrow, and
 `/api/posts` is the listing endpoint. Only `/api/search` takes these; `/api/posts`
 and the sitemap are unchanged.
+
+### Searching by CID
+
+A comment CID pasted into a search box is one opaque token the full-text index
+can never match, so when `q` is exactly one CID — CIDv0 (`Qm…`) or CIDv1
+(`bafy…`), recognised by parsing it rather than by pattern — `/api/search` looks
+it up by `comments.cid` instead and returns the comment as an ordinary result
+(`total: 1`); a client that already renders search results needs no change.
+Only the exact `cid` matches: a CID that appears solely as a thread or parent
+reference names a comment that was never indexed. Every other parameter still
+narrows — `community=` must be the comment's own, `nsfw=false` still hides an
+NSFW comment (a pasted CID is not a way around an instance's safe default) —
+and, like `/api/posts/:cid`, a removed, deleted or taken-down comment comes back
+as its redacted tombstone, though only for the bare lookup: with `author`,
+`site`, `url`, `self` or `selftext` set, tombstones stay hidden as in text
+search, since a yes/no answer over redacted content would leak it. A CID mixed
+with other words is an ordinary text search.
 
 ## Running your own instance
 

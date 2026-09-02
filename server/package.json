@@ -20,7 +20,8 @@
     "@fastify/cors": "^11.2.0",
     "@pkcprotocol/pkc-js": "0.0.62",
     "better-sqlite3": "^12.11.1",
-    "fastify": "^5.10.0"
+    "fastify": "^5.10.0",
+    "multiformats": "^14.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
