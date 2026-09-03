@@ -311,14 +311,41 @@ export function readSafeForWork(community: any): number | null {
 
 let ticking = false;
 
-async function tick(): Promise<void> {
+/**
+ * pkc-js keeps what a crawl loaded — community instances, their pages and the
+ * verification caches behind them — for the life of the PKC instance, and none
+ * of it is reachable from anything the crawler holds, so it cannot be released
+ * piecemeal. Measured against a 700-comment board, every crawl of it retained
+ * about 2 MB; on a 68-board instance refreshing every few seconds that reached
+ * the V8 heap cap, and an abort, every eight minutes. `destroy()` is the one
+ * thing that frees it, so a pass that used the client retires it on the way
+ * out and the next pass reconnects (a local WebSocket: a few hundred ms).
+ *
+ * Bounded so a daemon that will not close the socket cannot stall the loop.
+ * The cache is already cleared by then, so a late teardown only orphans the
+ * old client; it never touches the replacement.
+ */
+const PKC_RECYCLE_TIMEOUT_MS = 10_000;
+
+async function recyclePkcClient(): Promise<void> {
+  try {
+    await withTimeout(resetPkcClient({ quiet: true }), PKC_RECYCLE_TIMEOUT_MS, 'PKC client recycle');
+  } catch (err) {
+    console.error(`[crawler] ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** One crawl pass over every due community. Exported for tests. */
+export async function tick(): Promise<void> {
   // A pass slower than the interval must not run alongside the next one: the
   // two would compete for the same due rows.
   if (ticking) return;
   ticking = true;
+  let crawled = 0;
   try {
     await runWithConcurrency(due(), config.crawlConcurrency, async (row) => {
       const { community_address: address } = row;
+      crawled++;
       markRunning(address);
       try {
         const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
@@ -336,6 +363,9 @@ async function tick(): Promise<void> {
       }
     });
   } finally {
+    // Only a pass that crawled something has anything to release; recycling
+    // after an idle pass would be reconnect churn for nothing.
+    if (crawled) await recyclePkcClient();
     ticking = false;
   }
 }

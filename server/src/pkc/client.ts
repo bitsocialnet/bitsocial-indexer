@@ -20,6 +20,13 @@ let clientPromise: Promise<PkcClient> | null = null;
 let resetPromise: Promise<void> | null = null;
 
 /**
+ * Set by a routine recycle (see the crawler) so the reconnect it causes is not
+ * announced: one line per crawl pass would bury the connects that matter, the
+ * ones after a timeout or a daemon restart.
+ */
+let quietReconnect = false;
+
+/**
  * Identifies the cached client. Bumped on every connect, so a doomed client's
  * late failure can only retire itself — never a healthy replacement that a
  * concurrent crawl pass has already installed.
@@ -70,14 +77,17 @@ export function getPkcClient(): Promise<PkcClient> {
 }
 
 /**
- * Retire and close the current RPC client after a timed-out call. Clearing the
- * cache first lets new work reconnect immediately; the generation guard keeps
- * the old client's late teardown from evicting that replacement.
+ * Retire and close the current RPC client — after a timed-out call, or as the
+ * crawler's routine end-of-pass recycle (`quiet`, which also silences the
+ * connect log line of the replacement). Clearing the cache first lets new work
+ * reconnect immediately; the generation guard keeps the old client's late
+ * teardown from evicting that replacement.
  */
-export function resetPkcClient(): Promise<void> {
+export function resetPkcClient(opts: { quiet?: boolean } = {}): Promise<void> {
   const doomed = clientPromise;
   clientPromise = null;
   if (!doomed) return resetPromise ?? Promise.resolve();
+  if (opts.quiet) quietReconnect = true;
 
   const reset = doomed
     .then((client) => client.destroy())
@@ -104,9 +114,14 @@ async function connect(gen: number): Promise<PkcClient> {
   const mod: any = await import(specifier);
   const PKC = mod.default ?? mod;
 
+  // Consumed up front so a connect that fails here still uses up the quiet
+  // flag: the connect that eventually recovers from that failure is news.
+  const quiet = quietReconnect;
+  quietReconnect = false;
+
   const pkc = await PKC({ pkcRpcClientsOptions: [config.pkcRpcUrl] });
   pkc.on?.('error', (err: unknown) => console.error('[pkc] error event:', err));
-  console.log(`[pkc] connected via ${formatPkcRpcUrlForLog(config.pkcRpcUrl)}`);
+  if (!quiet) console.log(`[pkc] connected via ${formatPkcRpcUrlForLog(config.pkcRpcUrl)}`);
 
   /**
    * Run one RPC call, retiring this client if the connection turned out to be
