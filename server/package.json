@@ -20,7 +20,7 @@
     "@fastify/cors": "^11.2.0",
     "@pkcprotocol/pkc-js": "0.0.62",
     "better-sqlite3": "^12.11.1",
-    "fastify": "^5.10.0",
+    "fastify": "^5.12.1",
     "multiformats": "^14.0.0"
   },
   "devDependencies": {
@@ -31,7 +31,7 @@
   },
   "overrides": {
     "brace-expansion@1": "1.1.18",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
     "find-my-way": "9.7.0",
     "js-yaml@3": "3.15.1",
     "protobufjs": "7.6.5",
