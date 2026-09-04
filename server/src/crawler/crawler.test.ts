@@ -14,8 +14,12 @@ const {
   readSafeForWork,
   resolveDirectorySafeForWork,
   runWithConcurrency,
+  tick,
   withTimeout,
 } = await import('./crawler.js');
+const { enqueue } = await import('./queue.js');
+const { setPkcClientForTest } = await import('../pkc/client.js');
+const { getDb } = await import('../db/index.js');
 
 const ADDRESS = 'test.bso';
 
@@ -250,4 +254,32 @@ test('withTimeout rejects a hung crawl with a typed timeout error', async () => 
     withTimeout(new Promise<never>(() => {}), 5, 'test.bso crawl'),
     (err) => err instanceof CrawlTimeoutError && err.message === 'test.bso crawl exceeded 5ms',
   );
+});
+
+test('a crawl pass retires the PKC client it used; an idle pass leaves the cache alone', async () => {
+  let destroyed = 0;
+  setPkcClientForTest(
+    Promise.resolve({
+      getCommunity: async () => ({
+        title: 'Recycle',
+        posts: { pages: { new: { comments: [{ cid: 'recycle-p1', timestamp: 1, content: 'hello' }] } } },
+      }),
+      getComment: async () => ({}),
+      destroy: async () => {
+        destroyed++;
+      },
+    }),
+  );
+  enqueue(ADDRESS);
+
+  await tick();
+  assert.equal(destroyed, 1, 'the client that served the pass is destroyed once the pass ends');
+  const row = getDb().prepare('SELECT COUNT(*) AS n FROM comments WHERE cid = ?').get('recycle-p1') as { n: number };
+  assert.equal(row.n, 1, 'the pass still indexed what it crawled');
+
+  // The community is not due again until the interval elapses, so this pass
+  // crawls nothing and must not touch the client cache.
+  await tick();
+  assert.equal(destroyed, 1);
+  setPkcClientForTest(null);
 });
