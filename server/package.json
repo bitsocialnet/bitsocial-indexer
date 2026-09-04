@@ -1,6 +1,6 @@
 {
   "name": "@bitsocial/indexer-server",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Crawler + REST/search API for bitsocial-indexer",
   "license": "GPL-3.0-or-later",
@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
-    "@pkcprotocol/pkc-js": "0.0.62",
+    "@pkcprotocol/pkc-js": "0.0.98",
     "better-sqlite3": "^12.11.1",
     "fastify": "^5.12.1",
     "multiformats": "^14.0.0"
