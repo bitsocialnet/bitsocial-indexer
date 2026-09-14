@@ -11,7 +11,15 @@
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
     "doctor": "react-doctor . -y --blocking none",
-    "doctor:scan": "react-doctor scan"
+    "doctor:scan": "react-doctor scan",
+    "doctor:check": "node scripts/react-perf/doctor-check.mjs",
+    "perf:install": "node scripts/react-perf/install-browser.mjs",
+    "perf:test": "node scripts/react-perf/runner.mjs selftest",
+    "perf:check": "node scripts/react-perf/runner.mjs check",
+    "perf:record": "node scripts/react-perf/runner.mjs record",
+    "build:profile": "NEXT_PUBLIC_REACT_PERF=1 next build",
+    "start:profile": "NEXT_PUBLIC_REACT_PERF=1 next start",
+    "agent:verify": "npm run doctor:check && npm run typecheck && npm run perf:check && npm run build"
   },
   "dependencies": {
     "next": "^16.2.11",
@@ -24,7 +32,10 @@
     "@types/react-dom": "^19.2.3",
     "agentation": "3.0.2",
     "react-doctor": "0.9.14",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "@playwright/cli": "0.1.19",
+    "bippy": "0.7.3",
+    "esbuild": "0.28.2"
   },
   "overrides": {
     "brace-expansion@1": "1.1.18",

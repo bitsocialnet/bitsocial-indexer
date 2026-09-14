@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import './globals.css';
 import { BrandHeader } from '@/components/BrandHeader';
 import { DevTools } from '@/components/DevTools';
+import { PerfBoundary } from '@/components/PerfBoundary';
 import { SiteFooter } from '@/components/SiteFooter';
 import { siteName, siteTitle, siteUrl, theme } from '@/lib/site';
 
@@ -26,9 +27,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <DevTools />
         <div className="glow" aria-hidden />
-        <BrandHeader />
-        <main className="container">{children}</main>
-        <SiteFooter />
+        <PerfBoundary>
+          <BrandHeader />
+          <main className="container">{children}</main>
+          <SiteFooter />
+        </PerfBoundary>
       </body>
     </html>
   );

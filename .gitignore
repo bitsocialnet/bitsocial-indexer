@@ -22,3 +22,9 @@ next-env.d.ts
 *.log
 coverage/
 .turbo/
+
+# Local React profiling builds and evidence
+.next-perf/
+.next-perf-dev/
+.react-perf/
+.playwright-cli/

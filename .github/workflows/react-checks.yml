@@ -1,0 +1,60 @@
+name: React checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: react-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  webui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: webui
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      PERF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci
+      - run: npm run perf:install -- --with-deps
+      - name: React Doctor source checks
+        run: |
+          if [ -z "$PERF_BASE" ] || [ "$PERF_BASE" = "0000000000000000000000000000000000000000" ]; then
+            unset PERF_BASE
+          fi
+          npm run doctor:check
+      - name: Type check
+        run: npm run typecheck
+      - name: Collector compatibility and deterministic application scenarios
+        run: npm run perf:check -- --output .react-perf/ci
+      - name: Normal production build
+        run: npm run build
+      - name: Reject profiling code in normal production output
+        run: |
+          if grep -rlE '__REACT_PERF__|agentation-dev-tools' .next/static; then
+            echo 'Development profiling tooling leaked into normal production output' >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: react-performance-evidence
+          path: webui/.react-perf/
+          if-no-files-found: warn
