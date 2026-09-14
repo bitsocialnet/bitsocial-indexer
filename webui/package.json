@@ -9,7 +9,9 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "doctor": "react-doctor . -y --blocking none",
+    "doctor:scan": "react-doctor scan"
   },
   "dependencies": {
     "next": "^16.2.11",
@@ -20,8 +22,8 @@
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "react-grab": "^0.1.48",
-    "react-scan": "^0.5.7",
+    "agentation": "3.0.2",
+    "react-doctor": "0.9.14",
     "typescript": "^6.0.3"
   },
   "overrides": {
