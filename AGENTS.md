@@ -25,3 +25,7 @@ For deterministic profiling against an existing server, first run `node scripts/
 ## Visual feedback
 
 Agentation remains available in ordinary development through `webui/components/DevTools.tsx`, with server rendering disabled. The explicit profiling flag suppresses it in scenario and profiling builds so the toolbar cannot affect measurements. Use its toolbar to annotate elements and copy structured feedback into the coding conversation. The clipboard workflow does not require an MCP server. Keep all annotation and profiling tooling excluded from normal production bundles.
+
+## Retrospectives
+
+After a bug fix or substantive review correction exposes a preventable mistake, use the [retro skill](.agents/skills/retro/SKILL.md) to consider the smallest lasting prevention. Routine successful edits do not need a retrospective; no additional check is a valid outcome. Keep review-only requests free of edits.
