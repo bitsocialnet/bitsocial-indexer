@@ -93,6 +93,37 @@ test('origin guards run in the CLI VM without a URL global and preserve exact or
   assert.equal(await guard({ evaluate: async () => 'https://local.example' }), true);
   await assert.rejects(guard({ evaluate: async () => 'https://evil.test' }), /origin_changed/);
 });
+
+test('URL completion assertions use the same canonical form as the browser without mutating the input', () => {
+  const plan = basePlan();
+  plan.url = 'http://LOCALHOST:80';
+  plan.assertions = [{ type: 'url', equals: 'http://LOCALHOST:80' }];
+  const validated = validatePlan(plan);
+  assert.equal(validated.assertions[0].equals, 'http://localhost/');
+  assert.equal(validated.assertions[0].equals, validated.url);
+  assert.equal(plan.assertions[0].equals, 'http://LOCALHOST:80');
+});
+
+test('live CLI preflights missing credentials and model before a browser command can run', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'jev-cli-test-'));
+  try {
+    const planFile = path.join(directory, 'plan.json');
+    await writeFile(planFile, JSON.stringify(basePlan()));
+    for (const [key, model, reason] of [
+      ['', 'jev-1.13.0', 'missing_api_key'],
+      ['fixture-key', '', 'pinned_model_required'],
+    ]) {
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('../browser.mjs', import.meta.url)), '--plan', planFile, '--live'], {
+        encoding: 'utf8',
+        env: { ...process.env, TYPESAFE_API_KEY: key, JEV_MODEL: model, PLAYWRIGHT_CLI_BIN: path.join(directory, 'does-not-exist') },
+      });
+      assert.equal(result.status, 2);
+      assert.equal(JSON.parse(result.stdout).reason, reason);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 function fixtureDriver(extra = {}) {
   let stage = 0,
     closed = 0,
