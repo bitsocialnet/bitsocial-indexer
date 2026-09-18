@@ -34,6 +34,28 @@ jobs:
           cache-dependency-path: webui/package-lock.json
       - run: npm ci
       - run: npm run perf:install -- --with-deps
+      - name: Allow the installed Chromium to create its sandbox
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          # Ubuntu 24.04 restricts user namespaces for downloaded browser binaries.
+          # Scope the exception to this exact executable; keep Chromium sandboxing enabled.
+          chromium_path=$(node --input-type=module <<'NODE'
+          import { realpathSync } from 'node:fs';
+          import { browserDriver } from './scripts/react-perf/browser.mjs';
+          const executable = realpathSync(browserDriver().chromium.executablePath());
+          if (!/^\/[a-zA-Z0-9_./-]+$/.test(executable)) throw new Error('Unexpected character in Chromium profile path');
+          console.log(executable);
+          NODE
+          )
+          test -x "$chromium_path"
+          sudo tee /etc/apparmor.d/bitsocial-react-perf >/dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile bitsocial-react-perf "$chromium_path" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bitsocial-react-perf
       - name: React Doctor source checks
         run: |
           if [ -z "$PERF_BASE" ] || [ "$PERF_BASE" = "0000000000000000000000000000000000000000" ]; then
