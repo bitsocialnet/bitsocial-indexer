@@ -29,3 +29,7 @@ Agentation remains available in ordinary development through `webui/components/D
 ## Retrospectives
 
 After a bug fix or substantive review correction exposes a preventable mistake, use the [retro skill](.agents/skills/retro/SKILL.md) to consider the smallest lasting prevention. Routine successful edits do not need a retrospective; no additional check is a valid outcome. Keep review-only requests free of edits.
+
+## Optional Jev browser checks
+
+`scripts/jev/README.md` documents an opt-in bounded browser helper using the installed Playwright CLI and existing machine-wide session lock. Supply the fixture-backed web UI URL, an explicit allowed-action plan, and deterministic completion assertions. Offline plan validation needs no credentials; live semantic choices require explicit `--live`, runtime credentials, a pinned model, and a budget. Keep generated evidence outside Git. Use existing deterministic scenarios for fixed navigation/search and Bippy for performance; model judgments do not replace those checks.
