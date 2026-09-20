@@ -33,3 +33,9 @@ After a bug fix or substantive review correction exposes a preventable mistake, 
 ## Optional Jev browser checks
 
 `scripts/jev/README.md` documents an opt-in bounded browser helper using the installed Playwright CLI and existing machine-wide session lock. Supply the fixture-backed web UI URL, an explicit allowed-action plan, and deterministic completion assertions. Offline plan validation needs no credentials; live semantic choices require explicit `--live`, a pinned model, and a budget. Helpers automatically discover credentials and the default model from the private machine config described in that README, with environment overrides; `node scripts/jev/config.mjs --check` checks readiness without network calls. Offline validation does not read the config or key file. Keep generated evidence outside Git. Use existing deterministic scenarios for fixed navigation/search and Bippy for performance; model judgments do not replace those checks.
+
+## Optional Jev semantic review
+
+For an explicitly selected code or documentation diff, use `scripts/jev/review-README.md`. The bounded helper is opt-in, uses the private machine configuration only with `--live`, and produces advisory issues or uncertainty. Keep ordinary linting, tests, and independent review authoritative; do not add automatic edit, commit, or repair hooks. Offline checks run with `node --test scripts/jev/tests/*.test.mjs`.
+
+For investigation of recurring backend failures, `scripts/jev/triage-README.md` covers an opt-in experiment on explicitly sanitized event groups; keep deterministic alerts and original evidence. For labeled, already filtered FTS shortlists, `scripts/jev/rerank-README.md` covers page-local reranking with original-order fallback; application search remains unchanged. Both tools require explicit live invocation for provider calls and are not service integrations.
