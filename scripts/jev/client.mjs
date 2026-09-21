@@ -2,6 +2,9 @@
 import { resolveJevSettings, JevConfigError } from './config.mjs';
 export const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 export const INPUT_USD_PER_MILLION = 0.042;
+// Per-value half-cent rounding slack, not a tolerance for the combined weighted sum.
+// A live synthetic response is consistent with independently rounded Score/probabilities.
+export const SCORE_ROUNDING_TOLERANCE = 0.005 + 1e-9;
 
 export class JevError extends Error {
   constructor(code) {
@@ -16,6 +19,7 @@ const fail = (code) => {
   throw new JevError(code);
 };
 const probability = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+const criterion = (value) => typeof value === 'string' && value.length <= 2000;
 
 export function validateQuestions(questions) {
   if (!object(questions) || Object.keys(questions).length < 1 || Object.keys(questions).length > 20) fail('invalid_questions');
@@ -23,20 +27,74 @@ export function validateQuestions(questions) {
     if (
       !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(id) ||
       !object(question) ||
-      question.type !== 'choice' ||
+      !['choice', 'noul', 'score'].includes(question.type) ||
       typeof question.instructions !== 'string' ||
-      question.instructions.length > 4000 ||
-      !object(question.criteria)
+      question.instructions.length > 4000
     )
       fail('invalid_questions');
+    if (question.type === 'noul') {
+      if (
+        Object.hasOwn(question, 'criteria') &&
+        (!object(question.criteria) || Object.entries(question.criteria).some(([key, value]) => !['true', 'false'].includes(key) || !criterion(value)))
+      )
+        fail('invalid_questions');
+      continue;
+    }
+    if (question.type === 'score') {
+      if (!Array.isArray(question.criteria) || question.criteria.length < 2 || question.criteria.length > 10 || Array.from(question.criteria).some((value) => !criterion(value)))
+        fail('invalid_questions');
+      continue;
+    }
+    if (!object(question.criteria)) fail('invalid_questions');
     const choices = Object.keys(question.criteria);
     if (
       choices.length < 2 ||
       choices.length > 50 ||
-      choices.some((key) => !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(key) || typeof question.criteria[key] !== 'string' || question.criteria[key].length > 2000)
+      choices.some((key) => !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(key) || !criterion(question.criteria[key]))
     )
       fail('invalid_questions');
   }
+}
+
+function distribution(answer, keys) {
+  if (
+    !probability(answer.confidence) ||
+    !object(answer.probabilities) ||
+    Object.keys(answer.probabilities).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(answer.probabilities, key) || !probability(answer.probabilities[key]))
+  )
+    fail('invalid_response');
+  const values = keys.map((key) => answer.probabilities[key]);
+  if (Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 0.001) fail('invalid_response');
+  return values;
+}
+
+export function scoreMatchesProbabilities(score, probabilities) {
+  if (!Array.isArray(probabilities) || probabilities.length < 2 || probabilities.length > 10) return false;
+  const values = Array.from(probabilities);
+  if (values.some((value) => !probability(value)) || typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > values.length - 1) return false;
+  if (Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 0.001) return false;
+  // The observed response is consistent with independently rounded two-decimal
+  // values. Only those get intervals; more precise values remain exact.
+  // Require a feasible underlying distribution summing to one, without changing
+  // any returned value or treating arbitrary score differences as acceptable.
+  const slack = (value) => Math.abs(value * 100 - Math.round(value * 100)) <= 1e-9 ? SCORE_ROUNDING_TOLERANCE : 0;
+  const lower = values.map((value) => Math.max(0, value - slack(value)));
+  const upper = values.map((value) => Math.min(1, value + slack(value)));
+  const remaining = 1 - lower.reduce((sum, value) => sum + value, 0);
+  if (remaining < -1e-9 || upper.reduce((sum, value) => sum + value, 0) < 1 - 1e-9) return false;
+  const extremum = (descending) => {
+    let mass = Math.max(0, remaining);
+    let weighted = lower.reduce((sum, value, index) => sum + index * value, 0);
+    for (let position = 0; position < values.length; position++) {
+      const index = descending ? values.length - 1 - position : position;
+      const added = Math.min(mass, upper[index] - lower[index]);
+      weighted += index * added;
+      mass -= added;
+    }
+    return weighted;
+  };
+  return score + slack(score) >= extremum(false) - 1e-9 && score - slack(score) <= extremum(true) + 1e-9;
 }
 
 export function validateResponse(data, questions, model) {
@@ -44,19 +102,38 @@ export function validateResponse(data, questions, model) {
   const answers = {};
   for (const [id, question] of Object.entries(questions)) {
     const answer = data.answers[id];
+    if (!Object.hasOwn(data.answers, id) || !object(answer) || answer.type !== question.type) fail('invalid_response');
+    if (question.type === 'noul') {
+      if (!probability(answer.noul)) fail('invalid_response');
+      answers[id] = { noul: answer.noul };
+      continue;
+    }
+    if (question.type === 'score') {
+      const levels = question.criteria.map((_, index) => String(index));
+      const values = distribution(answer, levels);
+      if (
+        typeof answer.score !== 'number' ||
+        !Number.isFinite(answer.score) ||
+        answer.score < 0 ||
+        answer.score > levels.length - 1 ||
+        !object(answer.legend) ||
+        Object.keys(answer.legend).length !== levels.length ||
+        levels.some((level) => !Object.hasOwn(answer.legend, level) || answer.legend[level] !== question.criteria[Number(level)]) ||
+        !scoreMatchesProbabilities(answer.score, values)
+      )
+        fail('invalid_response');
+      answers[id] = {
+        score: answer.score,
+        confidence: answer.confidence,
+        probabilities: Object.fromEntries(levels.map((level) => [level, answer.probabilities[level]])),
+        legend: Object.fromEntries(levels.map((level) => [level, answer.legend[level]])),
+      };
+      continue;
+    }
+    if (question.type !== 'choice') fail('invalid_response');
     const choices = Object.keys(question.criteria);
-    if (
-      !object(answer) ||
-      answer.type !== 'choice' ||
-      !choices.includes(answer.choice) ||
-      !probability(answer.confidence) ||
-      !object(answer.probabilities) ||
-      Object.keys(answer.probabilities).length !== choices.length ||
-      choices.some((choice) => !probability(answer.probabilities[choice]))
-    )
-      fail('invalid_response');
-    const values = choices.map((choice) => answer.probabilities[choice]);
-    if (Math.abs(values.reduce((sum, value) => sum + value, 0) - 1) > 0.001 || answer.probabilities[answer.choice] < Math.max(...values)) fail('invalid_response');
+    const values = distribution(answer, choices);
+    if (!choices.includes(answer.choice) || answer.probabilities[answer.choice] < Math.max(...values)) fail('invalid_response');
     answers[id] = {
       choice: answer.choice,
       confidence: answer.confidence,

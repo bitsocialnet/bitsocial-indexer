@@ -17,13 +17,24 @@ A supplied JSON file cannot prove that its author applied server filters: `visib
   "sort": "relevance",
   "retrieval": "fts5",
   "scope": {
-    "page": 1, "limit": 20, "total": 120,
-    "visibilityApplied": true, "blocklistApplied": true,
-    "filters": {"nsfw": false, "includeReplies": true, "time": "all"}
+    "page": 1,
+    "limit": 20,
+    "total": 120,
+    "visibilityApplied": true,
+    "blocklistApplied": true,
+    "filters": { "nsfw": false, "includeReplies": true, "time": "all" }
   },
   "candidates": [
-    {"id": "original-cid-1", "title": "Local hiding", "snippet": "Hide this post on your device only."},
-    {"id": "original-cid-2", "title": "Delete a post", "snippet": "Remove the post from the community for everyone."}
+    {
+      "id": "original-cid-1",
+      "title": "Local hiding",
+      "snippet": "Hide this post on your device only."
+    },
+    {
+      "id": "original-cid-2",
+      "title": "Delete a post",
+      "snippet": "Remove the post from the community for everyone."
+    }
   ]
 }
 ```
@@ -67,4 +78,56 @@ NDCG uses graded gain `2^grade − 1` discounted by `log2(position + 1)`. MRR us
 
 The three shipped fixtures are **model-authored synthetic examples with deliberately weak initial order**, not real FTS output, independently reviewed relevance labels, or evidence of a production improvement. Use representative approved FTS exports and independently reviewed labels, then compare quality, latency and cost against the same original pages. Do not tune and judge on the same fixture set. Keep ordinary search and its filters unchanged until that evidence supports a separate product integration.
 
-The [TypeSafe reranking cookbook](https://docs.typesafe.ai/cookbooks/rerank_typesafe) motivates the retrieve-then-rank pattern. This experiment uses the repository's existing Choice client instead of adding Score/Noul support.
+## Compare a Score and Noul variant
+
+Choice remains the default. `--primitive score` explicitly selects a second experiment:
+one [Score](https://docs.typesafe.ai/primitives/score) per candidate with three described
+relevance levels, plus one [Noul](https://docs.typesafe.ai/primitives/noul) asking whether
+the query and excerpt supply enough evidence to judge relevance. An unrelated excerpt
+can still have sufficient evidence. All questions are batched in one request.
+
+The Score is a probability-weighted position from 0 (unrelated) to 2 (directly relevant).
+Its confidence/distribution remain visible; uncertainty between adjacent relevance
+levels is not treated as missing evidence. The Noul must be at least 0.9 for **every**
+candidate or the whole original order is retained. This is an explicit, uncalibrated
+pilot rule, not a transferred Choice threshold or a guarantee of correctness. Score
+answers must have the exact level keys/legend, normalized finite probabilities and
+a consistent weighted value. Observed responses need a separate half-cent rounding
+allowance for each two-decimal probability and the Score. The client checks that
+some underlying distribution summing to one could produce those values; it never
+renormalizes them. Higher-precision values remain exact. This is compatibility with
+observed serialization, not an official precision guarantee.
+
+This variant accepts at most **10 candidates**, preserving the existing 20-question
+request bound. A larger page falls back unchanged before loading credentials. It
+never takes just the first ten and silently drops the rest. Keep ordinary filters,
+pagination, scope and candidate IDs exactly as in the Choice experiment.
+
+```sh
+node scripts/jev/rerank.mjs --input /path/to/filtered-shortlist.json \
+  --primitive score --rerank --live --max-requests 1 --max-cost-usd 0.002
+
+# Offline paired report; neither variant calls Jev.
+node scripts/jev/rerank-eval.mjs --compare
+
+# Three shipped synthetic cases, two calls each, no retries or cached answers.
+node scripts/jev/rerank-eval.mjs --compare --live \
+  --max-requests 6 --max-cost-usd 0.005
+```
+
+The paired evaluator uses identical pages/labels and alternates which variant runs
+first per case. It includes failed/fallback runs in each variant's returned NDCG/MRR,
+counts reasons, and reports median helper latency. This compares two complete
+judgment designs, not an isolated primitive change: the Score variant adds the
+evidence question and uses a different eligibility rule. Do not attribute any
+difference solely to Score. Per-case usage is client-cumulative; the top-level usage
+is the total across both variants. Exit 2 preserves any fallback or offline result.
+Comparison defaults to enough request slots for both variants on every selected
+case. An explicitly smaller request budget is rejected before loading credentials;
+the spend and elapsed-time caps remain independent and may still cause reported fallbacks.
+
+Use a separately human-reviewed corpus before drawing conclusions. Synthetic
+mechanics results are not search-quality evidence; no variant is installed into
+the search endpoint. The [TypeSafe reranking cookbook](https://docs.typesafe.ai/cookbooks/rerank_typesafe)
+motivates the retrieve-then-rank pattern, and its [workflow evals](https://evals.typesafe.ai/)
+are design examples rather than independent labels for our queries.

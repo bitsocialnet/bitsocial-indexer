@@ -13,7 +13,12 @@ import {
   rerankShortlist,
   validateShortlist,
 } from "../rerank.mjs";
-import { evaluateReranking, rankingMetrics, validateRerankCorpus } from "../rerank-eval.mjs";
+import {
+  compareReranking,
+  evaluateReranking,
+  rankingMetrics,
+  validateRerankCorpus,
+} from "../rerank-eval.mjs";
 
 const shortlist = () => ({
   version: 1,
@@ -39,7 +44,11 @@ const shortlist = () => ({
     blocklistApplied: true,
   },
   candidates: [
-    { id: "a", title: "Global deletion", snippet: "Removes the post for everyone." },
+    {
+      id: "a",
+      title: "Global deletion",
+      snippet: "Removes the post for everyone.",
+    },
     { id: "b", title: "Local hiding", snippet: "Hide on this device only." },
   ],
 });
@@ -59,7 +68,12 @@ const response = (...choices) => ({
     choices.map((choice, index) => [`candidate_${index}`, answer(choice)]),
   ),
 });
-const options = (ask) => ({ enabled: true, live: true, model: "jev-1.13.0", client: { ask } });
+const options = (ask) => ({
+  enabled: true,
+  live: true,
+  model: "jev-1.13.0",
+  client: { ask },
+});
 
 test("one batched request submits only query and candidate text, preserves all IDs/filter/page metadata", async () => {
   const input = shortlist();
@@ -76,7 +90,10 @@ test("one batched request submits only query and candidate text, preserves all I
       ]);
       assert.ok(!JSON.stringify(state).includes("author-filter"));
       assert.equal(Object.keys(questions).length, 2);
-      assert.match(questions.candidate_1.instructions, /state\.candidates\[1\]/);
+      assert.match(
+        questions.candidate_1.instructions,
+        /state\.candidates\[1\]/,
+      );
       return response("unrelated", "direct");
     }),
   );
@@ -86,7 +103,10 @@ test("one batched request submits only query and candidate text, preserves all I
   assert.equal(result.scopeSha256, fingerprint(input.scope));
   assert.deepEqual([result.page, result.limit, result.total], [2, 2, 10]);
   assert.equal(JSON.stringify(input), before);
-  assert.strictEqual(applyCandidateOrder(input.candidates, result.order)[0], input.candidates[1]);
+  assert.strictEqual(
+    applyCandidateOrder(input.candidates, result.order)[0],
+    input.candidates[1],
+  );
   assert.ok(!JSON.stringify(result).includes("Removes the post"));
 });
 
@@ -101,15 +121,18 @@ test("non-relevance sorts, no opt-in, offline, and short pages never invoke infe
     assert.deepEqual(result.order, ["a", "b"]);
   }
   assert.equal(
-    (await rerankShortlist(shortlist(), { ...options(ask), enabled: false })).reason,
+    (await rerankShortlist(shortlist(), { ...options(ask), enabled: false }))
+      .reason,
     "not_enabled",
   );
   assert.equal(
-    (await rerankShortlist(shortlist(), { ...options(ask), live: false })).reason,
+    (await rerankShortlist(shortlist(), { ...options(ask), live: false }))
+      .reason,
     "live_disabled",
   );
   assert.equal(
-    (await rerankShortlist({ ...shortlist(), candidates: [] }, options(ask))).reason,
+    (await rerankShortlist({ ...shortlist(), candidates: [] }, options(ask)))
+      .reason,
     "shortlist_too_small",
   );
 });
@@ -167,8 +190,13 @@ test("ties preserve original order and applying an invalid permutation cannot ad
   );
   assert.deepEqual(result.order, ["a", "b"]);
   for (const ids of [["a"], ["a", "a"], ["a", "new"], ["a", "b", "new"]])
-    assert.throws(() => applyCandidateOrder(input.candidates, ids), /exactly once/);
-  const many = Array.from({ length: 20 }, (_, index) => ({ id: `id-${index}` }));
+    assert.throws(
+      () => applyCandidateOrder(input.candidates, ids),
+      /exactly once/,
+    );
+  const many = Array.from({ length: 20 }, (_, index) => ({
+    id: `id-${index}`,
+  }));
   assert.deepEqual(
     applyCandidateOrder(many, many.map((row) => row.id).reverse()),
     [...many].reverse(),
@@ -228,9 +256,15 @@ test("NDCG uses graded discounted gains and MRR counts only direct matches; all-
   ];
   const baseline = rankingMetrics(["partial", "direct", "no"], labels);
   assert.equal(baseline.reciprocalRank, 0.5);
-  assert.ok(Math.abs(baseline.ndcg - (1 + 3 / Math.log2(3)) / (3 + 1 / Math.log2(3))) < 1e-12);
+  assert.ok(
+    Math.abs(baseline.ndcg - (1 + 3 / Math.log2(3)) / (3 + 1 / Math.log2(3))) <
+      1e-12,
+  );
   assert.equal(rankingMetrics(["direct", "partial", "no"], labels).ndcg, 1);
-  assert.equal(rankingMetrics(["partial", "direct", "no"], labels, 1).reciprocalRank, 0);
+  assert.equal(
+    rankingMetrics(["partial", "direct", "no"], labels, 1).reciprocalRank,
+    0,
+  );
   assert.deepEqual(rankingMetrics(["x"], [{ id: "x", grade: 0 }]), {
     cutoff: 1,
     ndcg: null,
@@ -278,7 +312,11 @@ test("evaluation separates offline baseline from live returned order, with label
       return response("unrelated", "direct");
     },
   };
-  const live = await evaluateReranking(corpus, { live: true, client, model: "jev-1.13.0" });
+  const live = await evaluateReranking(corpus, {
+    live: true,
+    client,
+    model: "jev-1.13.0",
+  });
   assert.equal(live.summary.returnedNdcg, 1);
   assert.equal(live.summary.returnedMrr, 1);
   const fallback = await evaluateReranking(corpus, {
@@ -293,7 +331,8 @@ test("evaluation separates offline baseline from live returned order, with label
   assert.equal(fallback.summary.fallbacks, 1);
   assert.equal(fallback.summary.returnedMrr, 0.5);
   assert.throws(
-    () => validateRerankCorpus({ ...corpus, provenance: "independently-reviewed" }),
+    () =>
+      validateRerankCorpus({ ...corpus, provenance: "independently-reviewed" }),
     /reviewer/,
   );
 });
@@ -305,7 +344,12 @@ test("CLI --live without --rerank keeps offline original order even with an inva
   await fs.writeFile(file, JSON.stringify(shortlist()));
   const result = spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../rerank.mjs", import.meta.url)), "--input", file, "--live"],
+    [
+      fileURLToPath(new URL("../rerank.mjs", import.meta.url)),
+      "--input",
+      file,
+      "--live",
+    ],
     {
       encoding: "utf8",
       env: { ...process.env, JEV_CONFIG_FILE: "/absent-configuration-fixture" },
@@ -320,7 +364,12 @@ test("CLI --live without --rerank keeps offline original order even with an inva
 
 test("shipped fixtures are valid synthetic corpora and do not claim measured retrieval performance", async () => {
   const corpus = validateRerankCorpus(
-    JSON.parse(await fs.readFile(new URL("../fixtures/rerank.json", import.meta.url), "utf8")),
+    JSON.parse(
+      await fs.readFile(
+        new URL("../fixtures/rerank.json", import.meta.url),
+        "utf8",
+      ),
+    ),
   );
   assert.equal(corpus.provenance, "synthetic");
   assert.match(corpus.description, /not independently human-reviewed/);
@@ -347,4 +396,228 @@ test("a file that grows after stat remains bounded and is rejected", async () =>
     fs.open = originalOpen;
   }
   assert.equal(closed, true);
+});
+
+function scoredResponse(
+  questions,
+  probabilities = [
+    [0.8, 0.2, 0],
+    [0, 0.2, 0.8],
+  ],
+) {
+  return {
+    model: "jev-1.13.0",
+    answers: Object.fromEntries(
+      probabilities.flatMap((values, index) => [
+        [
+          `candidate_${index}`,
+          {
+            score: values[1] + 2 * values[2],
+            confidence: 0.2,
+            probabilities: Object.fromEntries(
+              values.map((value, level) => [level, value]),
+            ),
+            legend: Object.fromEntries(
+              questions[`candidate_${index}`].criteria.map((value, level) => [
+                level,
+                value,
+              ]),
+            ),
+          },
+        ],
+        [`evidence_${index}`, { noul: 0.99 }],
+      ]),
+    ),
+  };
+}
+
+test("Score separates graded relevance uncertainty from evidence sufficiency and retains scope", async () => {
+  let calls = 0;
+  const input = shortlist();
+  const before = JSON.stringify(input);
+  const report = await rerankShortlist(input, {
+    ...options(async ({ state, questions }) => {
+      calls++;
+      assert.deepEqual(Object.keys(questions), [
+        "candidate_0",
+        "evidence_0",
+        "candidate_1",
+        "evidence_1",
+      ]);
+      assert.equal(questions.candidate_0.type, "score");
+      assert.equal(questions.evidence_0.type, "noul");
+      assert.deepEqual(Object.keys(state), ["query", "candidates"]);
+      assert.ok(!JSON.stringify(state).includes("author-filter"));
+      return scoredResponse(questions);
+    }),
+    primitive: "score",
+  });
+  assert.equal(calls, 1);
+  assert.equal(report.primitive, "score");
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.order, ["b", "a"]);
+  assert.equal(report.judgments[0].confidence, 0.2);
+  assert.equal(report.judgments[0].evidenceProbability, 0.99);
+  assert.equal(JSON.stringify(input), before);
+  assert.equal(report.scopeSha256, fingerprint(input.scope));
+});
+
+test("Score/Noul malformed data and missing evidence preserve whole original page", async () => {
+  for (const mutate of [
+    (data) => {
+      data.answers.evidence_0.noul = 0.89;
+    },
+    (data) => {
+      delete data.answers.evidence_0;
+    },
+    (data) => {
+      data.answers.evidence_0.noul = "0.99";
+    },
+    (data) => {
+      data.answers.evidence_0.noul = NaN;
+    },
+    (data) => {
+      data.answers.candidate_0.score = 20;
+    },
+    (data) => {
+      data.answers.candidate_0.score = 0.8;
+    },
+    (data) => {
+      data.answers.candidate_0.confidence = -1;
+    },
+    (data) => {
+      data.answers.candidate_0.probabilities["extra"] = 0;
+    },
+    (data) => {
+      data.answers.candidate_0.probabilities["0"] = 0;
+    },
+    (data) => {
+      data.answers.candidate_0.legend["0"] = "PRIVATE PROVIDER BODY";
+    },
+  ]) {
+    const report = await rerankShortlist(shortlist(), {
+      ...options(async ({ questions }) => {
+        const data = scoredResponse(questions);
+        mutate(data);
+        return data;
+      }),
+      primitive: "score",
+    });
+    assert.equal(report.applied, false);
+    assert.deepEqual(report.order, ["a", "b"]);
+    assert.ok(!JSON.stringify(report).includes("PRIVATE"));
+  }
+});
+
+test("Score accepts bounded serialization slack, preserves ties, and never calls for oversized pages", async () => {
+  const report = await rerankShortlist(shortlist(), {
+    ...options(async ({ questions }) => {
+      const data = scoredResponse(questions, [
+        [0.005, 0.995, 0],
+        [0.005, 0.995, 0],
+      ]);
+      for (const id of ["candidate_0", "candidate_1"])
+        data.answers[id].score = 1;
+      return data;
+    }),
+    primitive: "score",
+  });
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.order, ["a", "b"]);
+  const input = shortlist();
+  input.candidates = Array.from({ length: 11 }, (_, index) => ({
+    id: `${index}`,
+    title: "Title",
+    snippet: "Text",
+  }));
+  input.scope.limit = 11;
+  input.scope.total = 11;
+  let calls = 0;
+  const large = await rerankShortlist(input, {
+    ...options(async () => {
+      calls++;
+    }),
+    primitive: "score",
+  });
+  assert.equal(large.reason, "score_shortlist_too_large");
+  assert.equal(calls, 0);
+  await assert.rejects(
+    () => rerankShortlist(shortlist(), { primitive: "unknown" }),
+    /Primitive/,
+  );
+});
+
+test("Score accepts the observed separately rounded values without changing returned judgments", async () => {
+  const report = await rerankShortlist(shortlist(), {
+    ...options(async ({ questions }) => {
+      const data = scoredResponse(questions, [
+        [0.79, 0.21, 0],
+        [0.79, 0.21, 0],
+      ]);
+      data.answers.candidate_0.score = 0.22;
+      return data;
+    }),
+    primitive: "score",
+  });
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.order, ["a", "b"]);
+  assert.equal(report.judgments[0].score, 0.22);
+  assert.equal(report.judgments[0].probabilities["1"], 0.21);
+});
+
+test("paired comparison alternates variants, withholds labels and includes failed runs in metrics", async () => {
+  const corpus = {
+    version: 1,
+    provenance: "synthetic",
+    cases: ["first", "second"].map((id) => ({
+      id,
+      shortlist: shortlist(),
+      labels: [
+        { id: "a", grade: 0 },
+        { id: "b", grade: 2 },
+      ],
+    })),
+  };
+  const modes = [];
+  const result = await compareReranking(corpus, {
+    live: true,
+    model: "jev-1.13.0",
+    client: {
+      ask: async ({ questions, state }) => {
+        const mode = questions.candidate_0.type;
+        modes.push(mode);
+        assert.ok(!JSON.stringify(state).includes("labels"));
+        if (mode === "choice") throw new JevError("provider_timeout");
+        return scoredResponse(questions);
+      },
+    },
+  });
+  assert.deepEqual(modes, ["choice", "score", "score", "choice"]);
+  assert.equal(result.summary.variants.choice.fallbacks, 2);
+  assert.equal(result.summary.variants.choice.returnedMrr, 0.5);
+  assert.equal(result.summary.variants.score.applied, 2);
+  assert.equal(result.summary.variants.score.returnedMrr, 1);
+  const offline = await compareReranking(corpus);
+  assert.equal(offline.summary.variants.score.returnedMrr, null);
+  assert.equal(offline.summary.variants.choice.medianElapsedMs, null);
+});
+
+test("comparison rejects an insufficient request budget before reading private settings", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL("../rerank-eval.mjs", import.meta.url)),
+      "--compare",
+      "--live",
+      "--max-requests",
+      "5",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, JEV_CONFIG_FILE: "/absent-configuration-fixture" },
+    },
+  );
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /could not run/);
 });
