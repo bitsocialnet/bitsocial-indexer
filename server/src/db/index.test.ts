@@ -114,22 +114,27 @@ test('content persists and is marked archived after it disappears upstream', () 
   const t1 = now - 100;
   const t2 = now - 10;
   const cid = 'op-archived';
-  insertComments([makeComment({ cid, content: 'ephemeral capybara', first_seen_at: t1, last_seen_at: t1 })]);
-  upsertCommunity({ address: COMMUNITY, last_indexed_at: t1 });
+  const community = 'complete-crawl.bso';
+  insertComments([makeComment({ cid, community_address: community, content: 'ephemeral capybara', first_seen_at: t1, last_seen_at: t1 })]);
+  upsertCommunity({ address: community, last_indexed_at: t1 });
   assert.equal(getThread(cid)?.post.archived, 0);
 
-  // Next crawl succeeds but no longer sees the thread (purged upstream).
-  upsertCommunity({ address: COMMUNITY, last_indexed_at: t2 });
+  // A successful bounded crawl does not prove that an unseen thread is gone.
+  upsertCommunity({ address: community, last_indexed_at: t2 });
+  assert.equal(getThread(cid)?.post.archived, 0);
+  // An exhaustive all-time crawl no longer sees the thread (purged upstream).
+  upsertCommunity({ address: community, last_complete_posts_crawl_at: t2 });
   const thread = getThread(cid);
   assert.ok(thread, 'thread is still served after upstream purge');
   assert.equal(thread.post.content, 'ephemeral capybara');
   assert.equal(thread.post.archived, 1);
   assert.equal(searchPosts({ q: 'capybara' }).total, 1);
-  const listed = listPosts({ community: COMMUNITY }).posts.find((p) => p.cid === cid);
+  const listed = listPosts({ community }).posts.find((p) => p.cid === cid);
   assert.equal(listed?.archived, 1);
 
-  // Restore for other tests.
-  upsertCommunity({ address: COMMUNITY, last_indexed_at: t1 });
+  // Seeing the OP again restores active status even after an earlier absence.
+  insertComments([makeComment({ cid, community_address: community, last_seen_at: now })]);
+  assert.equal(getThread(cid)?.post.archived, 0);
 });
 
 test('an explicit upstream archived flag also marks the thread archived', () => {
@@ -137,6 +142,74 @@ test('an explicit upstream archived flag also marks the thread archived', () => 
   insertComments([makeComment({ cid, upstream_archived: true, last_seen_at: now })]);
   upsertCommunity({ address: COMMUNITY, last_indexed_at: now });
   assert.equal(getThread(cid)?.post.archived, 1);
+});
+
+test('explicit unarchive reverses the flag while omission preserves prior moderation', () => {
+  const post = makeComment({ cid: 'unarchive-op', upstream_archived: true });
+  insertComments([post]);
+  insertComments([{ ...post, upstream_archived: undefined }]);
+  assert.equal(getThread(post.cid)?.post.archived, 1);
+  insertComments([{ ...post, upstream_archived: false }]);
+  assert.equal(getThread(post.cid)?.post.archived, 0);
+  assert.equal(getThread(post.cid)?.post.upstream_archived, 0);
+});
+
+test('replies inherit the root status regardless of their own crawl age or flag', () => {
+  const community = 'reply-status.bso';
+  upsertCommunity({ address: community, last_indexed_at: now, last_complete_posts_crawl_at: now - 10 });
+  const post = makeComment({ cid: 'status-root', community_address: community, last_seen_at: now });
+  const reply = makeComment({
+    cid: 'status-reply', community_address: community, post_cid: post.cid, parent_cid: post.cid,
+    depth: 1, last_seen_at: now - 100, content: 'inherited platypus', upstream_archived: true,
+  });
+  insertComments([post, reply]);
+  assert.equal(getThread(post.cid)?.replies[0]?.archived, 0, 'stale/depth-limited replies remain live with their root');
+  assert.equal(getThread(reply.cid)?.post.archived, 0, 'direct reply lookup agrees');
+  assert.equal(searchPosts({ q: 'platypus', includeReplies: true, status: 'active' }).total, 1);
+  assert.equal(listPosts({ community, includeReplies: true }).posts.find((p) => p.cid === reply.cid)?.archived, 0);
+
+  insertComments([{ ...post, upstream_archived: true }]);
+  assert.equal(getThread(post.cid)?.replies[0]?.archived, 1);
+  insertComments([{ ...post, upstream_archived: false, last_seen_at: now - 100 }]);
+  assert.equal(getThread(post.cid)?.replies[0]?.archived, 1, 'inferred root archive also applies to replies');
+  assert.equal(searchPosts({ q: 'platypus', includeReplies: true, status: 'archived' }).total, 1);
+});
+
+test('an orphan reply has no inferred archive status without root evidence', () => {
+  const community = 'orphan-status.bso';
+  upsertCommunity({ address: community, last_complete_posts_crawl_at: now });
+  const reply = makeComment({
+    cid: 'orphan-reply', community_address: community, post_cid: 'unknown-root', parent_cid: 'unknown-root',
+    depth: 1, last_seen_at: now - 100,
+  });
+  insertComments([reply]);
+  assert.equal(getThread(reply.cid)?.post.archived, 0);
+  insertComments([{ ...reply, upstream_archived: true }]);
+  assert.equal(getThread(reply.cid)?.post.archived, 1, 'own explicit archive flag remains usable');
+});
+
+test('search status filters both rows and totals before pagination and composes with other filters', () => {
+  const community = 'search-status.bso';
+  upsertCommunity({ address: community, last_complete_posts_crawl_at: now - 10 });
+  insertComments(Array.from({ length: 6 }, (_, i) => makeComment({
+    cid: `search-status-${i}`, community_address: community, content: 'statuswombat',
+    author_address: 'status-author.bso', link: 'https://example.com/status', timestamp: now - i,
+    last_seen_at: i % 2 === 0 ? now : now - 100,
+  })));
+  const query = { q: 'statuswombat', community, author: 'status-author.bso', site: 'example.com', time: 'day' as const, sort: 'new' as const };
+  assert.equal(searchPosts(query).total, 6, 'omitting status stays backward compatible');
+  assert.equal(searchPosts({ ...query, status: 'all' }).total, 6);
+  const active = searchPosts({ ...query, status: 'active', page: 2, limit: 2 });
+  assert.equal(active.total, 3);
+  assert.deepEqual(active.posts.map((p) => p.cid), ['search-status-4']);
+  const archived = searchPosts({ ...query, status: 'archived', limit: 2 });
+  assert.equal(archived.total, 3);
+  assert.deepEqual(archived.posts.map((p) => p.cid), ['search-status-1', 'search-status-3']);
+  assert.equal(searchPosts({ community, author: 'status-author.bso', status: 'archived' }).total, 3, 'advanced-only query');
+  assert.equal(searchPosts({ status: 'active' }).total, 0, 'status alone is not a search');
+  assert.equal(searchPosts({ ...query, status: 'active', community: 'elsewhere.bso' }).total, 0);
+  insertComments([makeComment({ cid: 'search-status-0', community_address: community, author_address: 'status-author.bso', nsfw: true })]);
+  assert.equal(searchPosts({ ...query, status: 'active', nsfw: false }).total, 2, 'NSFW still narrows');
 });
 
 test('re-crawls refresh counters and last_seen_at but never blank archived content', () => {

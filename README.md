@@ -187,8 +187,29 @@ CORS-enabled so browser clients can call it directly.
 | `GET /api/communities` | Indexed communities + post counts + resolved `nsfw` flag + declared `safe_for_work` |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
-| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=`, plus the advanced filters below (NSFW excluded by default). A `q` that is a comment CID is looked up by CID instead (see below) |
+| `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=&status=active\|archived\|all`, plus the advanced filters below (NSFW excluded by default; status defaults to `all`). A `q` that is a comment CID is looked up by CID instead (see below) |
 | `GET /sitemap.xml`, `/robots.txt` | SEO |
+
+### Active and archived search results
+
+`status=active`, `status=archived`, and `status=all` filter by the thread's
+archive state. Omitting `status` keeps the existing `all` behavior. Filtering
+happens before pagination and applies to `total`, text searches, advanced
+filters, and CID lookups. `status` alone is not a search query; unknown values
+return HTTP 400.
+
+Every served comment's `archived` field uses its root post's status. A thread
+is archived when the upstream root explicitly says so, or when it is absent
+from a later successful, exhaustive all-time post crawl. Bounded crawls,
+time-filtered pages, failed fetches, and omitted replies do not prove that a
+thread was archived. An explicit upstream `archived: false` reverses the flag;
+an omitted flag preserves the last known value. With no stored root, a reply
+uses only its own explicit flag. Unknown status falls into `active`.
+
+Existing databases gain a nullable `last_complete_posts_crawl_at` community
+column without inferring completeness from older crawls. Until a complete
+crawl succeeds, only explicit flags establish archival. The migration is
+additive and retains stored content.
 
 ### Advanced search filters
 

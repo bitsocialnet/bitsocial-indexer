@@ -13,6 +13,8 @@ export interface Community {
   description: string | null;
   added_at: number;
   last_indexed_at: number | null;
+  /** Latest successful, exhaustive crawl of an all-time top-level post chain. */
+  last_complete_posts_crawl_at: number | null;
   /**
    * The community's own `features.safeForWork`, as the last crawl saw it.
    * Three-state, like the protocol field: 1 = declared safe for work,
@@ -62,6 +64,7 @@ export interface ServedComment extends Comment {
 
 export type Sort = 'new' | 'old' | 'top' | 'replies';
 export type TimeRange = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
+export type SearchStatus = 'active' | 'archived' | 'all';
 
 export interface ListOpts {
   community?: string;
@@ -142,19 +145,22 @@ const ORDER_BY: Record<Sort, string> = {
 };
 
 /**
- * A comment is "archived" (no longer live upstream) when its CommentUpdate said
- * so explicitly, or when the community has been crawled successfully after the
- * last time this comment appeared in its pages.
+ * Replies inherit their root post's status: bounded reply crawls say nothing
+ * about thread liveness. Absence only counts after an exhaustive all-time OP
+ * crawl. Without a stored root, honor only the comment's explicit flag.
  */
-const ARCHIVED_SQL = `CASE WHEN c.upstream_archived = 1
-    OR (c.last_seen_at IS NOT NULL AND m.last_indexed_at IS NOT NULL AND c.last_seen_at < m.last_indexed_at)
+const ARCHIVED_SQL = `CASE WHEN COALESCE(root.upstream_archived, c.upstream_archived) = 1
+    OR (root.last_seen_at IS NOT NULL AND m.last_complete_posts_crawl_at IS NOT NULL
+      AND root.last_seen_at < m.last_complete_posts_crawl_at)
   THEN 1 ELSE 0 END`;
 
 /** `m` is the comment's community row; every query below reads flags off it. */
 const JOIN_COMMUNITY = 'LEFT JOIN communities m ON m.address = c.community_address';
+const JOIN_ROOT = `LEFT JOIN comments root ON root.cid = CASE WHEN c.depth = 0 THEN c.cid ELSE c.post_cid END
+  AND root.depth = 0 AND root.community_address = c.community_address`;
 
 const SERVED_SELECT = `SELECT c.*, ${ARCHIVED_SQL} AS archived
-   FROM comments c ${JOIN_COMMUNITY}`;
+   FROM comments c ${JOIN_COMMUNITY} ${JOIN_ROOT}`;
 
 /** Filter applied to every listing/search: mod-queue content is never served. */
 const NOT_PENDING = 'c.pending_approval = 0';
@@ -223,6 +229,9 @@ function migrate(database: Database.Database): void {
   addColumns(database, 'communities', {
     nsfw: 'INTEGER NOT NULL DEFAULT 0',
     safe_for_work: 'INTEGER',
+    // Older crawls did not establish completeness, so never backfill this
+    // from last_indexed_at. NULL keeps unknown posts active until evidence.
+    last_complete_posts_crawl_at: 'INTEGER',
   });
   // Partial index: inference only ever asks which communities have a flagged
   // comment, so indexing the flagged rows alone keeps that a seek instead of a
@@ -286,12 +295,13 @@ function serve(row: ServedComment): ServedComment {
 export function upsertCommunity(c: Pick<Community, 'address'> & Partial<Community>): void {
   getDb()
     .prepare(
-      `INSERT INTO communities (address, title, description, added_at, last_indexed_at, safe_for_work)
-       VALUES (@address, @title, @description, @added_at, @last_indexed_at, @safe_for_work)
+      `INSERT INTO communities (address, title, description, added_at, last_indexed_at, last_complete_posts_crawl_at, safe_for_work)
+       VALUES (@address, @title, @description, @added_at, @last_indexed_at, @last_complete_posts_crawl_at, @safe_for_work)
        ON CONFLICT(address) DO UPDATE SET
          title = COALESCE(excluded.title, communities.title),
          description = COALESCE(excluded.description, communities.description),
          last_indexed_at = COALESCE(excluded.last_indexed_at, communities.last_indexed_at),
+         last_complete_posts_crawl_at = COALESCE(excluded.last_complete_posts_crawl_at, communities.last_complete_posts_crawl_at),
          safe_for_work = CASE WHEN @observed_safe_for_work = 1
            THEN excluded.safe_for_work ELSE communities.safe_for_work END`,
     )
@@ -301,6 +311,7 @@ export function upsertCommunity(c: Pick<Community, 'address'> & Partial<Communit
       description: c.description ?? null,
       added_at: c.added_at ?? nowSec(),
       last_indexed_at: c.last_indexed_at ?? null,
+      last_complete_posts_crawl_at: c.last_complete_posts_crawl_at ?? null,
       safe_for_work: c.safe_for_work ?? null,
       observed_safe_for_work: 'safe_for_work' in c ? 1 : 0,
     });
@@ -724,7 +735,7 @@ function parseCid(q: string | undefined): string | undefined {
   }
 }
 
-export function searchPosts(o: ListOpts & SearchFilters & { q?: string }): PostPage {
+export function searchPosts(o: ListOpts & SearchFilters & { q?: string; status?: SearchStatus }): PostPage {
   const cid = parseCid(o.q);
   // A CID is not text: it takes q's place as an exact `comments.cid` term and
   // never reaches the FTS index. `selftext` still does, and still narrows.
@@ -750,6 +761,10 @@ export function searchPosts(o: ListOpts & SearchFilters & { q?: string }): PostP
   // of them set tombstones stay hidden exactly as in text search.
   const bare = cid !== undefined && !match && filters.where.length === 0;
   const { where, params } = buildFilters(o, bare ? NOT_PENDING : VISIBLE);
+  if (o.status === 'active' || o.status === 'archived') {
+    where.push(`(${ARCHIVED_SQL}) = @archived`);
+    params.archived = o.status === 'archived' ? 1 : 0;
+  }
   if (cid) {
     where.push('c.cid = @cid');
     params.cid = cid;
@@ -765,8 +780,8 @@ export function searchPosts(o: ListOpts & SearchFilters & { q?: string }): PostP
   // filtered scan /api/posts already runs — and relevance has nothing to rank,
   // hence newest-first.
   const from = match
-    ? `comments_fts f JOIN comments c ON c.cid = f.cid ${JOIN_COMMUNITY}`
-    : `comments c ${JOIN_COMMUNITY}`;
+    ? `comments_fts f JOIN comments c ON c.cid = f.cid ${JOIN_COMMUNITY} ${JOIN_ROOT}`
+    : `comments c ${JOIN_COMMUNITY} ${JOIN_ROOT}`;
   const matched = match ? 'comments_fts MATCH @match AND ' : '';
   if (match) params.match = match;
   // 'top'/'replies'/'new'/'old' sort, defaulting to FTS relevance where there is any.
@@ -850,7 +865,7 @@ export function insertComments(rows: CommentInput[]): number {
        (@cid, @community_address, @post_cid, @parent_cid, @depth, @timestamp,
         @author_address, @author_name, @title, @content, @link, @thumbnail_url,
         @upvote_count, @downvote_count, @reply_count, @raw, @indexed_at, @removed_at,
-        @first_seen_at, @last_seen_at, 0, @removed, @deleted, @mod_reason, @upstream_archived,
+        @first_seen_at, @last_seen_at, 0, @removed, @deleted, @mod_reason, COALESCE(@upstream_archived, 0),
         @nsfw, @takedown, @takedown_reason)`,
   );
   const update = database.prepare(
@@ -863,8 +878,8 @@ export function insertComments(rows: CommentInput[]): number {
         pending_approval = @pending_approval,
         removed = @removed,
         deleted = @deleted,
-        upstream_archived = MAX(upstream_archived, @upstream_archived),
-        -- Sticky, like upstream_archived: a page that simply omits the flag must
+        upstream_archived = COALESCE(@upstream_archived, upstream_archived),
+        -- Sticky NSFW: a page that simply omits the flag must
         -- not silently un-flag content a safe-default search relies on. An
         -- operator override is how a wrong NSFW verdict gets corrected.
         nsfw = MAX(nsfw, @nsfw),
@@ -915,7 +930,7 @@ export function insertComments(rows: CommentInput[]): number {
         removed,
         deleted,
         mod_reason: r.mod_reason ?? null,
-        upstream_archived: r.upstream_archived ? 1 : 0,
+        upstream_archived: typeof r.upstream_archived === 'boolean' ? Number(r.upstream_archived) : null,
         nsfw: r.nsfw ? 1 : 0,
         last_seen_at: seenAt,
         now,

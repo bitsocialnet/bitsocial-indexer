@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS communities (
   description      TEXT,
   added_at         INTEGER NOT NULL,           -- unix seconds
   last_indexed_at  INTEGER,
+  last_complete_posts_crawl_at INTEGER,        -- exhaustive all-time OP crawl; NULL until proven
   -- The protocol's own community.features.safeForWork, as the last crawl saw
   -- it. Optional on the wire, so three-state here too: 1 = declared safe for
   -- work, 0 = declared NSFW, NULL = the owner never declared either way.

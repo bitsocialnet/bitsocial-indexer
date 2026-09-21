@@ -504,3 +504,49 @@ test('search treats a CID with other words as text, and leaves word queries alon
   assert.equal(await total('zebra'), 1);
   assert.equal(await total('koala'), 1);
 });
+
+test('search status defaults to all, validates values, and filters before totals and pagination', async () => {
+  const community = 'api-status.bso';
+  const now = Math.floor(Date.now() / 1000);
+  upsertCommunity({ address: community, last_complete_posts_crawl_at: now - 10 });
+  insertComments(Array.from({ length: 4 }, (_, i) => ({
+    cid: `api-status-${i}`, post_cid: `api-status-${i}`, community_address: community, depth: 0,
+    timestamp: now - i, last_seen_at: i % 2 ? now - 100 : now, content: 'statusbadger',
+  })));
+  assert.equal(await searchTotal('q=statusbadger'), 4);
+  assert.equal(await searchTotal('q=statusbadger&status=all'), 4);
+  for (const status of ['active', 'archived']) {
+    const response = await app.inject({ method: 'GET', url: `/api/search?q=statusbadger&sort=new&status=${status}&page=2&limit=1` });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as { total: number; posts: { cid: string; archived: number }[] };
+    assert.equal(body.total, 2);
+    assert.deepEqual(body.posts.map((p) => p.cid), [`api-status-${status === 'active' ? 2 : 3}`]);
+    assert.equal(body.posts[0]?.archived, Number(status === 'archived'));
+  }
+  const invalid = await app.inject({ method: 'GET', url: '/api/search?q=statusbadger&status=invalid' });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(await searchTotal('status=active'), 0);
+});
+
+test('CID status filtering inherits the root and preserves redacted tombstone lookups', async () => {
+  insertComments([{ cid: CID_OP, post_cid: CID_OP, community_address: 'api-cid.bso', depth: 0, timestamp: 1, upstream_archived: true }]);
+  assert.equal(await searchTotal(`q=${CID_OP}&status=active`), 0);
+  assert.equal(await searchTotal(`q=${CID_OP}&status=archived`), 1);
+  assert.equal(await searchTotal(`q=${CID_REPLY}&status=archived`), 1);
+  assert.equal(await searchTotal(`q=${CID_REPLY}&status=active`), 0);
+  assert.equal(await searchTotal(`q=${CID_REPLY}&status=archived&replies=false`), 0);
+  assert.equal(await searchTotal(`q=${CID_OP}&status=archived&community=elsewhere.bso`), 0);
+  const thread = await app.inject({ method: 'GET', url: `/api/posts/${CID_OP}` });
+  const body = thread.json() as { post: { archived: number }; replies: { archived: number }[] };
+  assert.equal(body.post.archived, 1);
+  assert.ok(body.replies.length > 0);
+  assert.ok(body.replies.every((reply) => reply.archived === 1));
+
+  insertComments([{ cid: CID_REMOVED, post_cid: CID_REMOVED, community_address: 'api-cid.bso', depth: 0, timestamp: 1, removed: true, upstream_archived: true }]);
+  assert.equal(await searchTotal(`q=${CID_REMOVED}&status=active`), 0);
+  const removed = await app.inject({ method: 'GET', url: `/api/search?q=${CID_REMOVED}&status=archived` });
+  const result = removed.json() as { total: number; posts: { content: string | null }[] };
+  assert.equal(result.total, 1);
+  assert.equal(result.posts[0]?.content, null);
+  assert.equal(await searchTotal(`q=${CID_REMOVED}&status=archived&self=yes`), 0, 'content filters still hide tombstones');
+});

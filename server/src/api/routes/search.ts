@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { searchPosts, type SelfFilter, type Sort, type TimeRange } from '../../db/index.js';
+import { searchPosts, type SearchStatus, type SelfFilter, type Sort, type TimeRange } from '../../db/index.js';
 
 interface SearchQuery {
   q?: string;
@@ -15,6 +15,7 @@ interface SearchQuery {
   limit?: number;
   replies?: boolean;
   nsfw?: boolean;
+  status?: SearchStatus;
 }
 
 const searchQuerySchema = {
@@ -41,6 +42,8 @@ const searchQuerySchema = {
     replies: { type: 'boolean', default: true },
     // Safe default: NSFW results are excluded unless the client asks for them.
     nsfw: { type: 'boolean', default: false },
+    // Existing archive clients keep searching everything unless they opt in.
+    status: { type: 'string', enum: ['active', 'archived', 'all'], default: 'all' },
   },
 } as const;
 
@@ -69,6 +72,7 @@ const route: FastifyPluginAsync = async (app) => {
         // The schema default applies, so an absent param excludes NSFW; pass it
         // through explicitly rather than letting `undefined` mean "unfiltered".
         nsfw: q.nsfw ?? false,
+        status: q.status,
       }),
     };
   });

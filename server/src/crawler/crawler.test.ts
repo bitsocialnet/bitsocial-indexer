@@ -7,6 +7,7 @@ import test from 'node:test';
 process.env.DB_PATH = ':memory:';
 const {
   CrawlTimeoutError,
+  collectFromPages,
   directoryListSource,
   mapComment,
   parseCommunityEntry,
@@ -19,7 +20,8 @@ const {
 } = await import('./crawler.js');
 const { enqueue } = await import('./queue.js');
 const { setPkcClientForTest } = await import('../pkc/client.js');
-const { getDb } = await import('../db/index.js');
+const { getCommunity, getDb, getThread, insertComments, upsertCommunity } = await import('../db/index.js');
+const { config } = await import('../config.js');
 
 const ADDRESS = 'test.bso';
 
@@ -34,7 +36,7 @@ test('mapComment maps a plain page comment with no moderation flags', () => {
   assert.equal(row.pending_approval, false);
   assert.equal(row.removed, false);
   assert.equal(row.deleted, false);
-  assert.equal(row.upstream_archived, false);
+  assert.equal(row.upstream_archived, undefined);
 });
 
 test('mapComment picks up pendingApproval flattened on the comment', () => {
@@ -63,6 +65,12 @@ test('mapComment picks up an author delete from the CommentUpdate edit', () => {
 test('mapComment picks up the upstream archived flag', () => {
   const row = mapComment({ cid: 'c7', timestamp: 1, raw: { commentUpdate: { archived: true } } }, ADDRESS);
   assert.equal(row?.upstream_archived, true);
+});
+
+test('mapComment preserves explicit unarchive separately from an unknown flag', () => {
+  assert.equal(mapComment({ cid: 'unarchive-1', archived: false, raw: { commentUpdate: { archived: true } } }, ADDRESS)?.upstream_archived, false);
+  assert.equal(mapComment({ cid: 'unarchive-2', raw: { commentUpdate: { archived: false } } }, ADDRESS)?.upstream_archived, false);
+  assert.equal(mapComment({ cid: 'unarchive-3', archived: 'false' }, ADDRESS)?.upstream_archived, undefined);
 });
 
 test('mapComment returns null without a cid', () => {
@@ -282,4 +290,131 @@ test('a crawl pass retires the PKC client it used; an idle pass leaves the cache
   await tick();
   assert.equal(destroyed, 1);
   setPkcClientForTest(null);
+});
+
+test('post collection prefers new across preloaded pages and page CIDs', async () => {
+  const calls: string[] = [];
+  const result = await collectFromPages({
+    pages: { topDay: { comments: [{ cid: 'filtered' }] }, hot: { comments: [{ cid: 'preloaded-hot' }] } },
+    pageCids: { new: 'new-page' },
+    getPage: async ({ cid }: { cid: string }) => {
+      calls.push(cid);
+      return { comments: [{ cid: 'new-post' }] };
+    },
+  }, 2, new Set());
+  assert.deepEqual(calls, ['new-page']);
+  assert.deepEqual(result.comments.map((c) => c.cid), ['new-post']);
+  assert.equal(result.complete, true);
+});
+
+test('collection respects the page cap without fetching one extra and recognizes exhaustion at the cap', async () => {
+  const calls: string[] = [];
+  let terminal = false;
+  const pages = {
+    pages: { new: { comments: [{ cid: 'first-post' }], nextCid: 'second-page' } },
+    getPage: async ({ cid }: { cid: string }) => {
+      calls.push(cid);
+      return { comments: [{ cid: 'second-post' }], ...(terminal ? {} : { nextCid: 'third-page' }) };
+    },
+  };
+  const bounded = await collectFromPages(pages, 2, new Set());
+  assert.equal(bounded.complete, false);
+  assert.deepEqual(calls, ['second-page']);
+  assert.equal(bounded.comments.length, 2);
+  terminal = true;
+  calls.length = 0;
+  const complete = await collectFromPages(pages, 2, new Set());
+  assert.equal(complete.complete, true);
+  assert.deepEqual(calls, ['second-page']);
+  calls.length = 0;
+  await collectFromPages({ pageCids: { new: 'first-page' }, getPage: pages.getPage }, 0, new Set());
+  assert.deepEqual(calls, [], 'a zero-page limit also avoids the first fetch');
+});
+
+test('only exhausted recognized all-time chains certify completeness', async () => {
+  for (const sort of ['new', 'hot', 'active', 'topAll', 'topDay', 'topWeek', 'unknown']) {
+    const result = await collectFromPages({ pages: { [sort]: { comments: [] } } }, 2, new Set());
+    assert.equal(result.complete, ['new', 'hot', 'active', 'topAll'].includes(sort), sort);
+  }
+  for (const pages of [
+    undefined,
+    {},
+    { pageCids: { new: 'missing-getter' } },
+    { pageCids: { new: 'missing-page' }, getPage: async () => undefined },
+    { pages: { new: {} } },
+    { pages: { new: { comments: [{}] } } },
+    { pages: { new: { comments: [], nextCid: 'missing-next-getter' } } },
+  ]) {
+    assert.equal((await collectFromPages(pages, 2, new Set())).complete, false);
+  }
+  await assert.rejects(collectFromPages({ pageCids: { new: 'failure' }, getPage: async () => { throw new Error('fetch failed'); } }, 2, new Set()), /fetch failed/);
+});
+
+async function crawlFixture(address: string, community: unknown): Promise<void> {
+  setPkcClientForTest(Promise.resolve({
+    getCommunity: async () => community,
+    getComment: async () => ({}),
+    destroy: async () => {},
+  }));
+  enqueue(address);
+  await tick();
+}
+
+test('crawler advances the watermark only for complete OP chains or resolved empty communities', async () => {
+  const fixtures = [
+    { community: { posts: { pages: { new: { comments: [{ cid: 'complete-fixture-op', depth: 0 }] } } } }, complete: true },
+    { community: { posts: { pages: { new: { comments: [], nextCid: 'not-fetched' } } } }, complete: false },
+    { community: { posts: { pages: { topDay: { comments: [] } } } }, complete: false },
+    { community: { posts: { pages: { new: { comments: [{ cid: 'not-an-op', depth: 1, parentCid: 'root' }] } } } }, complete: false },
+    { community: { raw: { communityIpfs: { updatedAt: 1, signature: { signature: 'verified-by-pkc' } } }, posts: { pages: {}, pageCids: {} } }, complete: true },
+    { community: {}, complete: false },
+    { community: { posts: { pages: {}, pageCids: {} } }, complete: false },
+    { community: { raw: { communityIpfs: {} } }, complete: false },
+    { community: { raw: { communityIpfs: { updatedAt: 1, signature: {}, posts: {} } } }, complete: false },
+  ];
+  for (const [i, fixture] of fixtures.entries()) {
+    const address = `crawl-fixture-${i}.bso`;
+    const cid = `old-fixture-${i}`;
+    upsertCommunity({ address, last_indexed_at: 100 });
+    insertComments([{ cid, post_cid: cid, community_address: address, depth: 0, timestamp: 1, last_seen_at: 1 }]);
+    await crawlFixture(address, fixture.community);
+    const community = getCommunity(address);
+    assert.ok(community?.last_indexed_at);
+    assert.equal(community.last_complete_posts_crawl_at !== null, fixture.complete, address);
+    assert.equal(getThread(cid)?.post.archived, Number(fixture.complete), address);
+  }
+});
+
+test('failed reply fetches do not certify a new complete post crawl', async () => {
+  const address = 'failed-replies.bso';
+  upsertCommunity({ address, last_complete_posts_crawl_at: 1 });
+  await crawlFixture(address, {
+    posts: { pages: { new: { comments: [{
+      cid: 'failed-replies-op',
+      replies: { pageCids: { new: 'reply-page' }, getPage: async () => { throw new Error('reply page failed'); } },
+    }] } } },
+  });
+  assert.equal(getCommunity(address)?.last_complete_posts_crawl_at, 1);
+  assert.equal(getThread('failed-replies-op'), null, 'failed passes do not partially ingest');
+});
+
+test('a timed-out crawl resolving late cannot ingest or certify completeness', async () => {
+  const address = 'late-crawl.bso';
+  const timeout = config.crawlTimeoutMs;
+  let resolveCommunity!: (value: unknown) => void;
+  const community = new Promise<unknown>((resolve) => { resolveCommunity = resolve; });
+  Object.defineProperty(config, 'crawlTimeoutMs', { value: 5 });
+  try {
+    upsertCommunity({ address, last_complete_posts_crawl_at: 1 });
+    setPkcClientForTest(Promise.resolve({ getCommunity: () => community, getComment: async () => ({}), destroy: async () => {} }));
+    enqueue(address);
+    await tick();
+    resolveCommunity({ posts: { pages: { new: { comments: [{ cid: 'late-op' }] } } } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(getCommunity(address)?.last_complete_posts_crawl_at, 1);
+    assert.equal(getThread('late-op'), null);
+  } finally {
+    Object.defineProperty(config, 'crawlTimeoutMs', { value: timeout });
+    setPkcClientForTest(null);
+  }
 });

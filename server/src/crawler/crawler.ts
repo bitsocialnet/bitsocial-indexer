@@ -188,6 +188,7 @@ function safeJson(value: unknown): string | null {
 export function mapComment(c: any, communityAddress: string, seenAt = nowSec()): CommentInput | null {
   if (!c?.cid) return null;
   const update = c.raw?.commentUpdate ?? {};
+  const archived = c.archived ?? update.archived;
   return {
     cid: c.cid,
     // Group by the address the operator configured, not a legacy address
@@ -214,7 +215,8 @@ export function mapComment(c: any, communityAddress: string, seenAt = nowSec()):
     removed: Boolean(c.removed ?? update.removed),
     deleted: Boolean(c.deleted ?? c.edit?.deleted ?? update.edit?.deleted),
     mod_reason: c.reason ?? update.reason ?? c.edit?.reason ?? update.edit?.reason ?? null,
-    upstream_archived: Boolean(c.archived ?? update.archived),
+    // Explicit false reverses moderation; an omitted flag is unknown.
+    upstream_archived: typeof archived === 'boolean' ? archived : undefined,
     // pkc-js resolves nsfw as commentUpdate.nsfw → commentUpdate.edit.nsfw →
     // comment.nsfw and flattens the winner onto the page comment, so the flat
     // value is authoritative when present; the rest covers other shapes.
@@ -227,20 +229,32 @@ export function mapComment(c: any, communityAddress: string, seenAt = nowSec()):
  * take the preloaded page, then follow `nextCid` via `getPage`, bounded by
  * `maxPages`. Dedupes against `seen`.
  */
-async function collectFromPages(pagesObj: any, maxPages: number, seen: Set<string>): Promise<any[]> {
-  if (!pagesObj) return [];
-  const sorts = Object.keys(pagesObj.pages ?? {});
-  const sort = sorts.includes('new') ? 'new' : sorts[0];
+const ALL_TIME_SORTS = ['new', 'hot', 'active', 'topAll'];
+
+export async function collectFromPages(
+  pagesObj: any,
+  maxPages: number,
+  seen: Set<string>,
+): Promise<{ comments: any[]; complete: boolean }> {
+  const result: any[] = [];
+  const incomplete = () => ({ comments: result, complete: false });
+  if (!pagesObj || maxPages < 1) return incomplete();
+  // Consider both surfaces before choosing: preloaded hot must not mask a new
+  // chain available by CID. Time-filtered/unknown sorts cannot prove absence.
+  const sorts = [...new Set([...Object.keys(pagesObj.pages ?? {}), ...Object.keys(pagesObj.pageCids ?? {})])];
+  const sort = ALL_TIME_SORTS.find((key) => sorts.includes(key)) ?? sorts[0];
+  if (!sort) return incomplete();
   let page = sort ? pagesObj.pages?.[sort] : undefined;
   if (!page) {
-    const cid = pagesObj.pageCids?.new ?? Object.values(pagesObj.pageCids ?? {})[0];
+    const cid = pagesObj.pageCids?.[sort];
     if (cid && typeof pagesObj.getPage === 'function') page = await pagesObj.getPage({ cid });
   }
 
-  const result: any[] = [];
   let pages = 0;
   while (page && pages < maxPages) {
-    for (const c of page.comments ?? []) {
+    if (!Array.isArray(page.comments)) return incomplete();
+    for (const c of page.comments) {
+      if (typeof c?.cid !== 'string' || !c.cid) return incomplete();
       if (c?.cid && !seen.has(c.cid)) {
         seen.add(c.cid);
         result.push(c);
@@ -248,10 +262,24 @@ async function collectFromPages(pagesObj: any, maxPages: number, seen: Set<strin
     }
     pages++;
     const next = page.nextCid;
-    if (!next || typeof pagesObj.getPage !== 'function') break;
+    if (next == null) return { comments: result, complete: ALL_TIME_SORTS.includes(sort) };
+    // Do not fetch a page that the configured bound prevents us from reading.
+    if (pages >= maxPages || typeof next !== 'string' || !next || typeof pagesObj.getPage !== 'function') break;
     page = await pagesObj.getPage({ cid: next });
   }
-  return result;
+  return incomplete();
+}
+
+/** PKC's verified community record omits posts only when no visible OP remains. */
+function isResolvedEmptyCommunity(community: any): boolean {
+  const record = community?.raw?.communityIpfs;
+  return Boolean(
+    record && typeof record === 'object' && !Array.isArray(record)
+    && typeof record.updatedAt === 'number' && record.signature && typeof record.signature === 'object'
+    && !('posts' in record)
+    && Object.keys(community?.posts?.pages ?? {}).length === 0
+    && Object.keys(community?.posts?.pageCids ?? {}).length === 0,
+  );
 }
 
 /** Map a post and recurse into its reply tree, bounded by reply depth. */
@@ -260,19 +288,18 @@ async function collectThread(comment: any, address: string, out: CommentInput[],
   if (mapped) out.push(mapped);
   if (depth >= config.crawlMaxReplyDepth) return;
   const replies = await collectFromPages(comment?.replies, config.crawlMaxPages, seen);
-  for (const reply of replies) await collectThread(reply, address, out, seen, depth + 1, seenAt);
+  for (const reply of replies.comments) await collectThread(reply, address, out, seen, depth + 1, seenAt);
 }
 
 /**
  * Fetch a community's posts (+ reply threads) via PKC and upsert them.
  *
  * Everything collected in one pass is stamped with the same `crawledAt`, which
- * also becomes the community's `last_indexed_at`. A comment whose last_seen_at
- * is older than the community's last_indexed_at therefore fell out of the live
- * pages (archived/purged upstream) — it stays in the index and is served with
- * `archived: 1`.
+ * also becomes `last_indexed_at`. Only an exhausted all-time post chain advances
+ * `last_complete_posts_crawl_at`: bounded/filtered crawls cannot prove absence.
  */
 async function indexCommunity(address: string): Promise<number> {
+  const deadline = Date.now() + config.crawlTimeoutMs;
   const pkc = await getPkcClient();
   const community: any = await pkc.getCommunity(address);
   const crawledAt = nowSec();
@@ -280,14 +307,20 @@ async function indexCommunity(address: string): Promise<number> {
   const out: CommentInput[] = [];
   const seen = new Set<string>();
   const posts = await collectFromPages(community?.posts, config.crawlMaxPages, seen);
-  for (const post of posts) await collectThread(post, address, out, seen, 0, crawledAt);
+  for (const post of posts.comments) await collectThread(post, address, out, seen, 0, crawledAt);
+  const complete = (posts.complete && posts.comments.every((post) => (post.depth ?? 0) === 0 && !post.parentCid))
+    || isResolvedEmptyCommunity(community);
 
+  // withTimeout cannot cancel an RPC promise. A response arriving after its
+  // lease failed must not write late observations or certify a complete crawl.
+  if (Date.now() >= deadline) throw new CrawlTimeoutError(`${address} crawl exceeded ${config.crawlTimeoutMs}ms`);
   const inserted = insertComments(out);
   upsertCommunity({
     address,
     title: community?.title ?? null,
     description: community?.description ?? null,
     last_indexed_at: crawledAt,
+    ...(complete ? { last_complete_posts_crawl_at: crawledAt } : {}),
     // The owner's own declaration, and the strongest signal after an operator
     // override. Written only when the community actually resolved, so a failed
     // lookup cannot erase the last one; `null` here is a real observation —
