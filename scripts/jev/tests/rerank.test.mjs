@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { JevError } from "../client.mjs";
+import { JevError, validateQuestions } from "../client.mjs";
 import {
   applyCandidateOrder,
   fingerprint,
@@ -16,6 +16,7 @@ import {
 import {
   compareReranking,
   evaluateReranking,
+  main as evaluateMain,
   rankingMetrics,
   validateRerankCorpus,
 } from "../rerank-eval.mjs";
@@ -620,4 +621,195 @@ test("comparison rejects an insufficient request budget before reading private s
   assert.equal(result.status, 2);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /could not run/);
+});
+
+test("default and explicit baseline retain the pre-trial prompt hashes and fallback rules", async () => {
+  const hashes = {
+    choice: "2fe60334d6e92b3966e8265d7accfcc1860aff9088afb4b812bd62c552ae1338",
+    score: "e24090a999238f0b6da6fa2560ea11cc544cc53c22e02a5303c79a464fd4546f",
+  };
+  for (const primitive of ["choice", "score"]) {
+    for (const rubricOptions of [{}, { rubric: "baseline" }]) {
+      const report = await rerankShortlist(shortlist(), {
+        ...options(async ({ questions }) => {
+          if (primitive === "choice") return response("uncertain", "direct");
+          const data = scoredResponse(questions);
+          data.answers.evidence_0.noul = 0.89;
+          return data;
+        }),
+        primitive,
+        ...rubricOptions,
+      });
+      assert.equal(report.rubric, "baseline");
+      assert.equal(report.rubricSha256, hashes[primitive]);
+      assert.equal(report.applied, false);
+      assert.deepEqual(report.order, ["a", "b"]);
+      assert.equal(
+        report.reason,
+        primitive === "choice"
+          ? "ambiguous_or_invalid_answer"
+          : "insufficient_evidence",
+      );
+    }
+  }
+});
+
+test("contrastive questions fit the shared client contract and report the exact selected prompt hash", async () => {
+  for (const primitive of ["choice", "score"]) {
+    let submitted;
+    const report = await rerankShortlist(shortlist(), {
+      ...options(async ({ questions, state }) => {
+        validateQuestions(questions);
+        submitted = questions;
+        assert.deepEqual(Object.keys(state), ["query", "candidates"]);
+        return primitive === "choice"
+          ? response("unrelated", "direct")
+          : scoredResponse(questions);
+      }),
+      primitive,
+      rubric: "contrastive",
+    });
+    const baseline = await rerankShortlist(shortlist(), { primitive });
+    assert.equal(report.rubric, "contrastive");
+    assert.notEqual(report.rubricSha256, baseline.rubricSha256);
+    assert.equal(
+      report.rubricSha256,
+      fingerprint(
+        primitive === "choice" ? Object.values(submitted) : submitted,
+      ),
+    );
+    assert.match(JSON.stringify(submitted), /kitchen-specific/);
+    assert.equal(report.applied, true);
+    assert.deepEqual(report.order, ["b", "a"]);
+    assert.deepEqual([report.page, report.limit, report.total], [2, 2, 10]);
+    assert.equal(report.scopeSha256, baseline.scopeSha256);
+    assert.equal(report.shortlistSha256, baseline.shortlistSha256);
+  }
+});
+
+test("Score rejects a valid but wrong-rubric legend, and contrastive failures preserve the page", async () => {
+  let baselineQuestions;
+  await rerankShortlist(shortlist(), {
+    ...options(async ({ questions }) => {
+      baselineQuestions = questions;
+      return scoredResponse(questions);
+    }),
+    primitive: "score",
+  });
+  for (const primitive of ["choice", "score"]) {
+    const report = await rerankShortlist(shortlist(), {
+      ...options(async () =>
+        primitive === "score"
+          ? scoredResponse(baselineQuestions)
+          : response("uncertain", "direct"),
+      ),
+      primitive,
+      rubric: "contrastive",
+    });
+    assert.equal(report.applied, false);
+    assert.deepEqual(report.order, ["a", "b"]);
+    if (primitive === "score")
+      assert.equal(report.reason, "invalid_provider_answers");
+    let calls = 0;
+    const sorted = await rerankShortlist(
+      { ...shortlist(), sort: "new" },
+      {
+        ...options(async () => {
+          calls++;
+        }),
+        primitive,
+        rubric: "contrastive",
+      },
+    );
+    assert.equal(calls, 0);
+    assert.equal(sorted.reason, "explicit_sort_preserved");
+  }
+});
+
+test("evaluations select either rubric on the same labeled corpus without sending labels", async () => {
+  const corpus = {
+    version: 1,
+    provenance: "synthetic",
+    cases: [
+      {
+        id: "comparison-fixture",
+        shortlist: shortlist(),
+        labels: [{ id: "a", grade: 0 }, { id: "b", grade: 2 }],
+      },
+    ],
+  };
+  const reports = [];
+  for (const rubric of ["baseline", "contrastive"]) {
+    const report = await evaluateReranking(corpus, {
+      live: true,
+      model: "jev-1.13.0",
+      primitive: "score",
+      rubric,
+      client: {
+        ask: async ({ state, questions }) => {
+          assert.deepEqual(Object.keys(state), ["query", "candidates"]);
+          assert.ok(!JSON.stringify(state).includes("comparison-fixture"));
+          return scoredResponse(questions);
+        },
+      },
+    });
+    assert.equal(report.rubric, rubric);
+    assert.equal(report.results[0].report.rubric, rubric);
+    reports.push(report);
+  }
+  assert.equal(reports[0].corpusSha256, reports[1].corpusSha256);
+  assert.notEqual(
+    reports[0].results[0].report.rubricSha256,
+    reports[1].results[0].report.rubricSha256,
+  );
+  const paired = await compareReranking(corpus, { rubric: "contrastive" });
+  assert.equal(paired.rubric, "contrastive");
+  for (const primitive of ["choice", "score"])
+    assert.equal(
+      paired.results[0].variants[primitive].report.rubric,
+      "contrastive",
+    );
+});
+
+test("invalid rubric is rejected before inference or live evaluation settings", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => rerankShortlist(shortlist(), {
+      ...options(async () => {
+        calls++;
+      }),
+      rubric: "other",
+    }),
+    /Rubric must be baseline or contrastive/,
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    () => evaluateMain(["--live", "--rubric", "other"]),
+    /Rubric must be baseline or contrastive/,
+  );
+});
+
+test("contrastive CLI dry runs retain original order without private settings", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL("../rerank-eval.mjs", import.meta.url)),
+      "--rubric", "contrastive", "--primitive", "score",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, JEV_CONFIG_FILE: "/absent-configuration-fixture" },
+    },
+  );
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, "");
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.rubric, "contrastive");
+  assert.equal(report.summary.returnedNdcg, null);
+  assert.equal(report.usage, null);
+  for (const row of report.results) {
+    assert.equal(row.report.rubric, "contrastive");
+    assert.equal(row.report.reason, "live_disabled");
+    assert.deepEqual(row.report.order, row.report.baselineOrder);
+  }
 });

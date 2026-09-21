@@ -131,3 +131,50 @@ mechanics results are not search-quality evidence; no variant is installed into
 the search endpoint. The [TypeSafe reranking cookbook](https://docs.typesafe.ai/cookbooks/rerank_typesafe)
 motivates the retrieve-then-rank pattern, and its [workflow evals](https://evals.typesafe.ai/)
 are design examples rather than independent labels for our queries.
+
+## Trial contrastive criteria without changing the default
+
+`--rubric baseline` is the default and keeps the original questions, answer rules
+and thresholds. `--rubric contrastive` adds author-written examples distinguishing
+a direct answer from vocabulary overlap, missing scope, or a contradicted
+constraint. An explicit negative answer to a capability question can still answer
+that question directly. These illustrative thermostat/timer/alarm examples are
+separate from the shipped evaluation cases and are **not human-reviewed labels**.
+The trial does not change sorting, evidence thresholds, filters, pagination, model,
+candidate limits or failure behavior. The Score variant retains its existing
+independent evidence Noul and validates the exact selected Score legend.
+
+```sh
+# Validate the trial offline, with no key/config reads and no quality claim.
+node scripts/jev/rerank.mjs --input /path/to/filtered-shortlist.json \
+  --rubric contrastive --rerank
+node scripts/jev/rerank-eval.mjs --primitive score --rubric contrastive
+
+# Optional live trial on an explicitly approved, filtered shortlist.
+node scripts/jev/rerank.mjs --input /path/to/filtered-shortlist.json \
+  --primitive score --rubric contrastive --rerank --live \
+  --max-requests 1 --max-cost-usd 0.002
+
+# Compare rubrics with the SAME corpus, selected cases, primitive and pinned model.
+# Each has its own one-request/$0.002 cap: at most two requests/$0.004 in total.
+node scripts/jev/rerank-eval.mjs --corpus /path/to/held-out-search-cases.json \
+  --cases selected-query-id --primitive score --rubric baseline \
+  --live --max-requests 1 --max-cost-usd 0.002
+node scripts/jev/rerank-eval.mjs --corpus /path/to/held-out-search-cases.json \
+  --cases selected-query-id --primitive score --rubric contrastive \
+  --live --max-requests 1 --max-cost-usd 0.002
+```
+
+Every report identifies `rubric`; each per-page `rubricSha256` fingerprints the
+actual questions (including the selected criteria). Baseline prompt hashes retain
+their prior format. Compare matching `corpusSha256`, model and primitive values;
+include all returned-order metrics and fallbacks rather than picking only successful
+runs. The two commands are separate runs, not an automatically randomized experiment.
+`--compare --rubric contrastive` still compares Choice versus Score/Noul, both under
+the contrastive rubric; it does **not** compare the two rubrics.
+
+Use independently reviewed labels and reserve a held-out corpus that was not used
+to write examples or tune thresholds. Do not paste evaluation cases or their labels
+into the rubric, treat author-written fixtures as human evidence, or promote this
+trial from mechanics tests alone. No real search-quality improvement has been
+established; application search continues to use its existing behavior.

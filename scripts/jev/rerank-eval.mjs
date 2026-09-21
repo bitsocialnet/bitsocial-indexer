@@ -9,6 +9,7 @@ import {
   readRerankJson,
   rerankShortlist,
   RerankInputError,
+  validateRerankRubric,
   validateShortlist,
 } from "./rerank.mjs";
 
@@ -101,9 +102,10 @@ export function validateRerankCorpus(input) {
 
 export async function evaluateReranking(
   corpus,
-  { client, model, live = false, primitive = "choice" } = {},
+  { client, model, live = false, primitive = "choice", rubric = "baseline" } = {},
 ) {
   validateRerankCorpus(corpus);
+  validateRerankRubric(rubric);
   const results = [];
   for (const entry of corpus.cases) {
     const baselineOrder = entry.shortlist.candidates.map(
@@ -115,6 +117,7 @@ export async function evaluateReranking(
       client,
       model,
       primitive,
+      rubric,
     });
     results.push({
       id: entry.id,
@@ -136,6 +139,7 @@ export async function evaluateReranking(
     live,
     model: model || null,
     primitive,
+    rubric,
     corpusSha256: fingerprint(corpus),
     provenance: corpus.provenance,
     note: "Developer experiment; synthetic input order is not an actual FTS benchmark. Graded labels are never sent to Jev. MRR uses grade 2 as a direct match. NDCG excludes all-zero-label cases from its mean. Returned-order metrics include deterministic fallbacks. No population or threshold-quality claim.",
@@ -168,9 +172,10 @@ const median = (values) => {
 
 export async function compareReranking(
   corpus,
-  { client, model, live = false } = {},
+  { client, model, live = false, rubric = "baseline" } = {},
 ) {
   validateRerankCorpus(corpus);
+  validateRerankRubric(rubric);
   const results = [];
   for (const [index, entry] of corpus.cases.entries()) {
     // Alternate order to avoid always giving one variant the first request.
@@ -180,7 +185,7 @@ export async function compareReranking(
     for (const primitive of order) {
       const result = await evaluateReranking(
         { ...corpus, cases: [entry] },
-        { client, model, live, primitive },
+        { client, model, live, primitive, rubric },
       );
       variants[primitive] = result.results[0];
     }
@@ -226,6 +231,7 @@ export async function compareReranking(
     live,
     model: model || null,
     comparison: "choice-vs-score-noul",
+    rubric,
     corpusSha256: fingerprint(corpus),
     provenance: corpus.provenance,
     note: "Paired advisory experiment; same labeled pages, alternating request order, all fallbacks included. Labels are withheld. Synthetic results do not establish production gains. Summing per-case client-cumulative usage is invalid; use this report's single usage total.",
@@ -258,6 +264,7 @@ export async function main(argv = process.argv.slice(2)) {
       live: { type: "boolean", default: false },
       model: { type: "string" },
       primitive: { type: "string", default: "choice" },
+      rubric: { type: "string", default: "baseline" },
       compare: { type: "boolean", default: false },
       "max-requests": { type: "string" },
       "max-cost-usd": { type: "string", default: "0.005" },
@@ -266,11 +273,12 @@ export async function main(argv = process.argv.slice(2)) {
   });
   if (values.help) {
     console.log(
-      "Usage: node scripts/jev/rerank-eval.mjs [--corpus reviewed-shortlists.json] [--cases query1,query2] [--primitive choice|score | --compare] [--live --max-requests 5 --max-cost-usd 0.005]\nCompare alternates both variants per page (two requests per case); Score accepts at most 10 candidates. Offline makes no inference calls; labels are withheld from live calls.",
+      "Usage: node scripts/jev/rerank-eval.mjs [--corpus reviewed-shortlists.json] [--cases query1,query2] [--primitive choice|score | --compare] [--rubric baseline|contrastive] [--live --max-requests 5 --max-cost-usd 0.005]\nCompare alternates both primitives per page under the selected rubric (two requests per case); Score accepts at most 10 candidates. Run identical corpus/primitive settings with each rubric to evaluate the criteria trial. Offline makes no inference calls; labels are withheld from live calls.",
     );
     return 0;
   }
   const input = validateRerankCorpus(await readRerankJson(values.corpus));
+  validateRerankRubric(values.rubric);
   if (
     !["choice", "score"].includes(values.primitive) ||
     (values.compare && values.primitive !== "choice")
@@ -322,12 +330,18 @@ export async function main(argv = process.argv.slice(2)) {
     : undefined;
   const model = client ? client.assertReady().model : null;
   const report = values.compare
-    ? await compareReranking(corpus, { client, model, live: values.live })
+    ? await compareReranking(corpus, {
+        client,
+        model,
+        live: values.live,
+        rubric: values.rubric,
+      })
     : await evaluateReranking(corpus, {
         client,
         model,
         live: values.live,
         primitive: values.primitive,
+        rubric: values.rubric,
       });
   console.log(JSON.stringify(report, null, 2));
   const fallbacks = values.compare
