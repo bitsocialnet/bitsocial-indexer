@@ -133,3 +133,5 @@ For transport modes and an explicit paired measurement runner, see [browser tran
 For explicitly selected, sanitized operational events, see [advisory log triage](triage-README.md). It does not suppress alerts or trigger repairs.
 
 For an offline-first experiment on an already filtered FTS result page, see [search reranking](rerank-README.md). It is not enabled in the search service or UI.
+
+For image-based observations over an explicitly captured Playwright screenshot, see [optional screenshot checks](../visual-qa/README.md). This separate provider adapter uses OpenAI Decisions; Jev text helpers are unchanged.
