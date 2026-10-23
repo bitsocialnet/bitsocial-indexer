@@ -22,7 +22,7 @@
     "agent:verify": "npm run doctor:check && npm run typecheck && npm run perf:check && npm run build"
   },
   "dependencies": {
-    "next": "^16.3.8",
+    "next": "^16.4.2",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
