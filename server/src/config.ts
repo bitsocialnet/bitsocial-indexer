@@ -4,10 +4,13 @@ function list(v: string | undefined): string[] {
   return (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** Largest delay Node timers honour; a longer one silently becomes 1ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export function positiveDuration(value: string | undefined, fallback: number, name: string): number {
   const duration = Number(value ?? fallback);
-  if (!Number.isFinite(duration) || duration <= 0) {
-    throw new Error(`${name} must be a finite positive number of milliseconds`);
+  if (!Number.isInteger(duration) || duration < 1 || duration > MAX_TIMER_MS) {
+    throw new Error(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}`);
   }
   return duration;
 }
