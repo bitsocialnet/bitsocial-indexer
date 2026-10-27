@@ -4,10 +4,13 @@ function list(v: string | undefined): string[] {
   return (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** Largest delay Node timers honour; a longer one silently becomes 1ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export function positiveDuration(value: string | undefined, fallback: number, name: string): number {
   const duration = Number(value ?? fallback);
-  if (!Number.isFinite(duration) || duration <= 0) {
-    throw new Error(`${name} must be a finite positive number of milliseconds`);
+  if (!Number.isInteger(duration) || duration < 1 || duration > MAX_TIMER_MS) {
+    throw new Error(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIMER_MS}`);
   }
   return duration;
 }
@@ -26,6 +29,12 @@ export const config = {
   /** Communities to index. BOTH empty by default → the indexer serves nothing. */
   communities: list(process.env.COMMUNITIES),
   communitiesSource: process.env.COMMUNITIES_SOURCE ?? '',
+
+  /**
+   * How often COMMUNITIES_SOURCE is re-read. New entries are scheduled at once;
+   * entries the list dropped stop being crawled. See reloadCommunities.
+   */
+  communitiesReloadMs: positiveDuration(process.env.COMMUNITIES_RELOAD_MS, 300_000, 'COMMUNITIES_RELOAD_MS'),
 
   /**
    * A Bitsocial client's `*-directories-defaults.json`, which states

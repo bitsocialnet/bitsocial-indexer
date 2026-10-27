@@ -14,7 +14,7 @@ import {
   type CommentInput,
 } from '../db/index.js';
 import { getPkcClient, resetPkcClient } from '../pkc/client.js';
-import { due, enqueue, markFailed, markRunning, markSuccess, reclaimAbandoned } from './queue.js';
+import { dequeue, due, enqueue, markFailed, markRunning, markSuccess, queued, reclaimAbandoned } from './queue.js';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -52,20 +52,71 @@ export async function runWithConcurrency<T>(
   );
 }
 
-/** Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list. */
-export async function resolveCommunities(): Promise<string[]> {
+/**
+ * Merge inline COMMUNITIES with an optional external COMMUNITIES_SOURCE list.
+ * `null` when the source could not be read: an unreadable list must never be
+ * mistaken for an empty one, or one failed fetch would unschedule everything.
+ */
+export async function resolveCommunities(source = config.communitiesSource): Promise<string[] | null> {
   const found = new Set<string>(config.communities);
-  if (config.communitiesSource) {
+  if (source) {
     try {
-      for (const item of await loadSource(config.communitiesSource)) {
+      const entries = await loadSource(source);
+      let usable = 0;
+      for (const item of entries) {
         const address = parseCommunityEntry(item);
-        if (address) found.add(address);
+        if (address) {
+          found.add(address);
+          usable++;
+        }
       }
+      // A list whose every entry lost its address is a schema change upstream,
+      // not an empty list.
+      if (entries.length && !usable) throw new Error(`none of its ${entries.length} entries has an address`);
     } catch (err) {
-      console.error(`[crawler] failed to load COMMUNITIES_SOURCE (${config.communitiesSource}):`, err);
+      // One line, not a stack: during an outage this repeats every reload.
+      console.error(`[crawler] failed to load COMMUNITIES_SOURCE (${source}): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
   }
   return [...found];
+}
+
+/**
+ * Make the crawl schedule match the configured list: schedule what it added,
+ * and stop crawling what it dropped (a community a review later blocked, say).
+ * A dropped community's archive stays served; taking content down is
+ * BLOCKLIST_SOURCE's job. Re-adding it resumes crawling where it left off.
+ */
+export function syncCommunities(addresses: string[]): { added: string[]; removed: string[] } {
+  const wanted = new Set(addresses);
+  const scheduled = new Set(queued());
+  const added = addresses.filter((address) => !scheduled.has(address));
+  const removed = [...scheduled].filter((address) => !wanted.has(address));
+  for (const address of added) {
+    upsertCommunity({ address, added_at: nowSec() });
+    enqueue(address);
+  }
+  for (const address of removed) dequeue(address);
+  return { added, removed };
+}
+
+let reloading = false;
+
+/** Re-read COMMUNITIES_SOURCE and apply it. A failed read changes nothing. Exported for tests. */
+export async function reloadCommunities(source = config.communitiesSource): Promise<void> {
+  if (reloading) return;
+  reloading = true;
+  try {
+    const communities = await resolveCommunities(source);
+    if (!communities) return;
+    const { added, removed } = syncCommunities(communities);
+    const sample = (list: string[]) => list.slice(0, 10).join(', ') + (list.length > 10 ? ', …' : '');
+    if (added.length) console.log(`[crawler] COMMUNITIES_SOURCE added ${added.length}: ${sample(added)}`);
+    if (removed.length) console.log(`[crawler] COMMUNITIES_SOURCE dropped ${removed.length}, no longer crawled: ${sample(removed)}`);
+  } finally {
+    reloading = false;
+  }
 }
 
 /** One entry of a community list: a bare address, or an object carrying one. */
@@ -75,20 +126,31 @@ export function parseCommunityEntry(item: unknown): string | null {
   return String((item as { address: unknown }).address).trim() || null;
 }
 
+/** Bounds one list fetch, so a source that never answers cannot stall a reload forever. */
+const SOURCE_TIMEOUT_MS = 30_000;
+
 /** A JSON source is either an http(s) URL or a local file path. */
 async function loadJson(source: string): Promise<unknown> {
-  if (/^https?:\/\//.test(source)) return (await fetch(source)).json();
+  if (/^https?:\/\//.test(source)) {
+    const res = await fetch(source, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) });
+    // An error body can be valid JSON; it is still not the list.
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
   const { readFile } = await import('node:fs/promises');
   return JSON.parse(await readFile(source, 'utf8'));
 }
 
-/** Address entries of a list file: `["a.bso", …]` or `{ communities|boards: [...] }`. */
+/**
+ * Address entries of a list file: `["a.bso", …]` or `{ communities|boards: [...] }`.
+ * Any other shape throws rather than reading as an empty list.
+ */
 async function loadSource(source: string): Promise<unknown[]> {
   const data = await loadJson(source);
   if (Array.isArray(data)) return data;
   const o = data as { communities?: unknown; boards?: unknown } | null;
   for (const entries of [o?.communities, o?.boards]) if (Array.isArray(entries)) return entries;
-  return [];
+  throw new Error('not a community list: expected an array, or an object with a `communities` or `boards` array');
 }
 
 // ── directory-level safeForWork ──────────────────────────────────────────────
@@ -378,8 +440,9 @@ export async function tick(): Promise<void> {
   try {
     await runWithConcurrency(due(), config.crawlConcurrency, async (row) => {
       const { community_address: address } = row;
+      // A reload may have dropped it after due() built this batch.
+      if (!markRunning(address)) return;
       crawled++;
-      markRunning(address);
       try {
         const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
         markSuccess(address, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
@@ -404,17 +467,25 @@ export async function tick(): Promise<void> {
 }
 
 let timer: NodeJS.Timeout | undefined;
+let reloadTimer: NodeJS.Timeout | undefined;
 
 export async function startCrawler(): Promise<void> {
   if (!hasConfiguredCommunities()) {
     console.log('[crawler] idle — no communities configured (COMMUNITIES / COMMUNITIES_SOURCE empty).');
     return;
   }
+  // An unreadable source still schedules the inline list and keeps the last
+  // schedule; the reload timer below retries it.
   const communities = await resolveCommunities();
-  console.log(`[crawler] scheduling ${communities.length} communities`);
-  for (const address of communities) {
+  const scheduled = communities ?? config.communities;
+  console.log(`[crawler] scheduling ${scheduled.length} communities`);
+  for (const address of scheduled) {
     upsertCommunity({ address, added_at: nowSec() });
     enqueue(address);
+  }
+  if (communities) {
+    const { removed } = syncCommunities(communities);
+    if (removed.length) console.log(`[crawler] ${removed.length} communities left the list and are no longer crawled`);
   }
   // The directory verdicts outrank inference, so apply them before the first
   // pass rather than after it.
@@ -426,10 +497,15 @@ export async function startCrawler(): Promise<void> {
   console.log(
     `[crawler] refresh target ${config.crawlIntervalMs}ms, concurrency ${config.crawlConcurrency}, timeout ${config.crawlTimeoutMs}ms`,
   );
+  if (config.communitiesSource) {
+    reloadTimer = setInterval(() => void reloadCommunities(), config.communitiesReloadMs);
+    console.log(`[crawler] re-reading COMMUNITIES_SOURCE every ${config.communitiesReloadMs}ms`);
+  }
   await tick();
   timer = setInterval(() => void tick(), config.crawlIntervalMs);
 }
 
 export function stopCrawler(): void {
   if (timer) clearInterval(timer);
+  if (reloadTimer) clearInterval(reloadTimer);
 }

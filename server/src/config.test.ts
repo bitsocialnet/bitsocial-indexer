@@ -8,10 +8,12 @@ test('positiveDuration preserves its fallback and accepts finite positive values
 });
 
 test('positiveDuration rejects values that cannot provide a real timeout', () => {
-  for (const value of ['0', '-1', 'NaN', 'Infinity']) {
+  // Above 2147483647 a Node timer fires after 1ms instead, so a reload would spin.
+  for (const value of ['0', '-1', 'NaN', 'Infinity', '0.5', '2147483648']) {
     assert.throws(
       () => positiveDuration(value, 300_000, 'TIMEOUT'),
-      /TIMEOUT must be a finite positive number of milliseconds/,
+      /TIMEOUT must be a whole number of milliseconds from 1 to 2147483647/,
     );
   }
+  assert.equal(positiveDuration('2147483647', 300_000, 'TIMEOUT'), 2_147_483_647);
 });
