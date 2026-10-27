@@ -323,28 +323,40 @@ export function upsertCommunity(c: Pick<Community, 'address'> & Partial<Communit
 
 export interface CommunitySummary extends Community {
   post_count: number;
+  /** Latest visible post or reply, unix seconds; null when there is none. */
+  last_activity_at: number | null;
 }
 
-export function listCommunities(): CommunitySummary[] {
-  return all<CommunitySummary>(
-    `SELECT c.*,
+/**
+ * `new` = most recently added to this index; `active` = latest visible post or
+ * reply. Omitted = most posts first.
+ */
+export type CommunitySort = 'new' | 'active';
+
+const COMMUNITY_VISIBLE = 'cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0 AND cm.takedown = 0';
+
+// A comment's timestamp is author-claimed. Capping it at when this indexer
+// first saw the comment keeps a future-dated post from pinning its community
+// to the top of `active`.
+const COMMUNITY_SELECT = `SELECT c.*,
             (SELECT COUNT(*) FROM comments cm
-              WHERE cm.community_address = c.address AND cm.depth = 0
-                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0 AND cm.takedown = 0) AS post_count
-       FROM communities c
-       ORDER BY post_count DESC, c.address ASC`,
-  );
+              WHERE cm.community_address = c.address AND cm.depth = 0 AND ${COMMUNITY_VISIBLE}) AS post_count,
+            (SELECT MAX(MIN(cm.timestamp, COALESCE(cm.first_seen_at, cm.timestamp))) FROM comments cm
+              WHERE cm.community_address = c.address AND ${COMMUNITY_VISIBLE}) AS last_activity_at
+       FROM communities c`;
+
+const COMMUNITY_ORDER: Record<CommunitySort | 'posts', string> = {
+  posts: 'post_count DESC',
+  new: 'c.added_at DESC',
+  active: 'last_activity_at DESC NULLS LAST',
+};
+
+export function listCommunities(sort?: CommunitySort): CommunitySummary[] {
+  return all<CommunitySummary>(`${COMMUNITY_SELECT} ORDER BY ${COMMUNITY_ORDER[sort ?? 'posts']}, c.address ASC`);
 }
 
 export function getCommunity(address: string): CommunitySummary | undefined {
-  return one<CommunitySummary>(
-    `SELECT c.*,
-            (SELECT COUNT(*) FROM comments cm
-              WHERE cm.community_address = c.address AND cm.depth = 0
-                AND cm.pending_approval = 0 AND cm.removed = 0 AND cm.deleted = 0 AND cm.takedown = 0) AS post_count
-       FROM communities c WHERE c.address = @address`,
-    { address },
-  );
+  return one<CommunitySummary>(`${COMMUNITY_SELECT} WHERE c.address = @address`, { address });
 }
 
 // ── NSFW signals ─────────────────────────────────────────────────────────────

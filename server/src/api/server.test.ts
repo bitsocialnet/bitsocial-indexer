@@ -204,6 +204,56 @@ test('communities expose the crawled safeForWork alongside the resolved flag', a
   assert.equal((unset.json() as { safe_for_work: number | null }).safe_for_work, null);
 });
 
+test('communities sort by most posts by default, newest added with sort=new, latest activity with sort=active', async () => {
+  upsertCommunity({ address: 'sort-old.bso', added_at: 100 });
+  upsertCommunity({ address: 'sort-busy.bso', added_at: 200 });
+  upsertCommunity({ address: 'sort-fresh.bso', added_at: 300 });
+  upsertCommunity({ address: 'sort-empty.bso', added_at: 50 });
+  const op = (cid: string, community: string, timestamp: number, extra: Record<string, unknown> = {}) => ({
+    cid,
+    community_address: community,
+    post_cid: cid,
+    depth: 0,
+    timestamp,
+    first_seen_at: 2_000,
+    ...extra,
+  });
+  insertComments([
+    op('sort-busy-1', 'sort-busy.bso', 1_000),
+    op('sort-busy-2', 'sort-busy.bso', 1_100),
+    // A reply is activity too.
+    { ...op('sort-old-reply', 'sort-old.bso', 1_500), post_cid: 'sort-old-1', parent_cid: 'sort-old-1', depth: 1 },
+    op('sort-old-1', 'sort-old.bso', 900),
+    // Claims to be from the future: counts as no later than when it was first seen.
+    op('sort-fresh-1', 'sort-fresh.bso', 9_999_999_999),
+    // Removed content is not activity.
+    op('sort-empty-removed', 'sort-empty.bso', 3_000, { removed: true }),
+  ]);
+
+  const order = async (query: string) => {
+    const res = await app.inject({ method: 'GET', url: `/api/communities${query}` });
+    assert.equal(res.statusCode, 200);
+    const { communities } = res.json() as { communities: { address: string; last_activity_at: number | null }[] };
+    return communities.filter((c) => c.address.startsWith('sort-'));
+  };
+
+  assert.deepEqual((await order('')).map((c) => c.address), ['sort-busy.bso', 'sort-fresh.bso', 'sort-old.bso', 'sort-empty.bso']);
+  assert.deepEqual((await order('?sort=new')).map((c) => c.address), ['sort-fresh.bso', 'sort-busy.bso', 'sort-old.bso', 'sort-empty.bso']);
+  const active = await order('?sort=active');
+  assert.deepEqual(active.map((c) => [c.address, c.last_activity_at]), [
+    ['sort-fresh.bso', 2_000],
+    ['sort-old.bso', 1_500],
+    ['sort-busy.bso', 1_100],
+    ['sort-empty.bso', null],
+  ]);
+
+  const one = await app.inject({ method: 'GET', url: '/api/communities/sort-old.bso' });
+  assert.equal((one.json() as { last_activity_at: number }).last_activity_at, 1_500);
+
+  const bad = await app.inject({ method: 'GET', url: '/api/communities?sort=hot' });
+  assert.equal(bad.statusCode, 400);
+});
+
 test('search drops results from a community whose owner declared it NSFW', async () => {
   upsertCommunity({ address: 'api-declared.bso', last_indexed_at: 1, safe_for_work: 0 });
   insertComments([

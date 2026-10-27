@@ -77,6 +77,7 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 |-----|---------|---------|
 | `COMMUNITIES` | _(empty)_ | Comma-separated community addresses to index, e.g. `art.bso,tech.bso` |
 | `COMMUNITIES_SOURCE` | _(empty)_ | URL/path to a JSON list of community addresses (e.g. a client's directory). Overrides/augments `COMMUNITIES`. |
+| `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
 | `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
@@ -89,6 +90,14 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 
 If neither `COMMUNITIES` nor `COMMUNITIES_SOURCE` is set, the crawler stays
 idle and the indexer serves nothing. That is intentional.
+
+The list is the crawl schedule, re-read every `COMMUNITIES_RELOAD_MS`, so a
+source such as a [bitsocial-discovery](https://github.com/bitsocialnet/bitsocial-discovery)
+filter takes effect without a restart. A community that leaves the list stops
+being crawled; what was already archived for it stays served until the
+blocklist takes it down. A source that cannot be read (network error, HTTP
+error, anything that is not a list) changes nothing, so an outage never
+unschedules everything; only a real empty list does.
 
 #### Takedowns (`BLOCKLIST_SOURCE`)
 
@@ -184,7 +193,7 @@ CORS-enabled so browser clients can call it directly.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | Status + index counts |
-| `GET /api/communities` | Indexed communities + post counts + resolved `nsfw` flag + declared `safe_for_work` |
+| `GET /api/communities` | Indexed communities + post counts + `last_activity_at` + resolved `nsfw` flag + declared `safe_for_work`. Most posts first; `?sort=new` = most recently added to this index, `?sort=active` = latest visible post or reply |
 | `GET /api/posts` | Browse posts — `?community=&sort=new\|top\|replies\|old&time=hour..all&page=&limit=&replies=true` |
 | `GET /api/posts/:cid` | A thread: original post + threaded replies |
 | `GET /api/search` | Full-text search — `?q=&community=&sort=&time=&page=&limit=&replies=&nsfw=&status=active\|archived\|all`, plus the advanced filters below (NSFW excluded by default; status defaults to `all`). A `q` that is a comment CID is looked up by CID instead (see below) |

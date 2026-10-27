@@ -28,6 +28,12 @@ export const config = {
   communitiesSource: process.env.COMMUNITIES_SOURCE ?? '',
 
   /**
+   * How often COMMUNITIES_SOURCE is re-read. New entries are scheduled at once;
+   * entries the list dropped stop being crawled. See reloadCommunities.
+   */
+  communitiesReloadMs: positiveDuration(process.env.COMMUNITIES_RELOAD_MS, 300_000, 'COMMUNITIES_RELOAD_MS'),
+
+  /**
    * A Bitsocial client's `*-directories-defaults.json`, which states
    * `features.safeForWork` once per directory code. Read together with the
    * sibling per-directory address lists to answer for communities whose owner

@@ -33,6 +33,22 @@ export function enqueue(address: string): void {
     .run({ address, now: nowSec() });
 }
 
+/** Every scheduled community address. */
+export function queued(): string[] {
+  return (getDb().prepare('SELECT community_address FROM crawl_queue').all() as { community_address: string }[]).map(
+    (row) => row.community_address,
+  );
+}
+
+/**
+ * Stop crawling a community. Its row and everything already archived for it
+ * stay; only the schedule goes. A pass already running finishes, and its
+ * markSuccess/markFailed then matches no row.
+ */
+export function dequeue(address: string): void {
+  getDb().prepare('DELETE FROM crawl_queue WHERE community_address = ?').run(address);
+}
+
 /**
  * Communities whose next_run_at is due (or never run).
  *
