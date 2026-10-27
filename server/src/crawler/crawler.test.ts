@@ -20,7 +20,7 @@ const {
   tick,
   withTimeout,
 } = await import('./crawler.js');
-const { enqueue, queued } = await import('./queue.js');
+const { dequeue, enqueue, queued } = await import('./queue.js');
 const { setPkcClientForTest } = await import('../pkc/client.js');
 const { getCommunity, getDb, getThread, insertComments, upsertCommunity } = await import('../db/index.js');
 const { config } = await import('../config.js');
@@ -442,7 +442,8 @@ test('reloading COMMUNITIES_SOURCE schedules added communities and stops crawlin
   assert.equal(getCommunity('drop.bso')?.post_count, 1, 'a dropped community keeps its archive');
 
   // None of these is a list, so none of them may empty the schedule.
-  for (const broken of ['{ not json', '{"error":"warming up"}', 'null']) {
+  // Nor is a nonempty list none of whose entries carries an address.
+  for (const broken of ['{ not json', '{"error":"warming up"}', 'null', '[{"name":"foo"}]', '{"boards":[""]}']) {
     write(broken);
     assert.equal(await resolveCommunities(source), null);
     await reloadCommunities(source);
@@ -451,6 +452,11 @@ test('reloading COMMUNITIES_SOURCE schedules added communities and stops crawlin
   rmSync(source);
   await reloadCommunities(source);
   assert.deepEqual(schedule(), ['keep.bso', 'new.bso'], 'unchanged while the file is missing');
+
+  // Unusable entries beside usable ones are skipped, as before.
+  write(['keep.bso', { name: 'no-address' }, 'new.bso']);
+  await reloadCommunities(source);
+  assert.deepEqual(schedule(), ['keep.bso', 'new.bso']);
 
   // A real empty list is a list.
   write({ boards: [] });
@@ -465,5 +471,33 @@ test('an HTTP error from COMMUNITIES_SOURCE is a failed read, even with a JSON b
     assert.equal(await resolveCommunities('https://discovery.example/api/communities'), null);
   } finally {
     globalThis.fetch = realFetch;
+  }
+});
+
+test('a pass skips a community a reload dropped after the pass built its batch', async () => {
+  const concurrency = config.crawlConcurrency;
+  Object.defineProperty(config, 'crawlConcurrency', { value: 1 });
+  const crawled: string[] = [];
+  setPkcClientForTest(
+    Promise.resolve({
+      getCommunity: async (address: string) => {
+        crawled.push(address);
+        // A reload lands mid-pass and drops whichever community is still waiting.
+        for (const other of ['first.bso', 'waiting.bso']) if (other !== address) dequeue(other);
+        return { posts: { pages: { new: { comments: [] } } } };
+      },
+      getComment: async () => ({}),
+      destroy: async () => {},
+    }),
+  );
+  try {
+    enqueue('first.bso');
+    enqueue('waiting.bso');
+    await tick();
+    assert.equal(crawled.length, 1, `crawled ${crawled.join(', ')}`);
+    assert.deepEqual(queued(), crawled);
+  } finally {
+    Object.defineProperty(config, 'crawlConcurrency', { value: concurrency });
+    setPkcClientForTest(null);
   }
 });

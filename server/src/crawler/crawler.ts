@@ -61,10 +61,18 @@ export async function resolveCommunities(source = config.communitiesSource): Pro
   const found = new Set<string>(config.communities);
   if (source) {
     try {
-      for (const item of await loadSource(source)) {
+      const entries = await loadSource(source);
+      let usable = 0;
+      for (const item of entries) {
         const address = parseCommunityEntry(item);
-        if (address) found.add(address);
+        if (address) {
+          found.add(address);
+          usable++;
+        }
       }
+      // A list whose every entry lost its address is a schema change upstream,
+      // not an empty list.
+      if (entries.length && !usable) throw new Error(`none of its ${entries.length} entries has an address`);
     } catch (err) {
       // One line, not a stack: during an outage this repeats every reload.
       console.error(`[crawler] failed to load COMMUNITIES_SOURCE (${source}): ${err instanceof Error ? err.message : String(err)}`);
@@ -432,8 +440,9 @@ export async function tick(): Promise<void> {
   try {
     await runWithConcurrency(due(), config.crawlConcurrency, async (row) => {
       const { community_address: address } = row;
+      // A reload may have dropped it after due() built this batch.
+      if (!markRunning(address)) return;
       crawled++;
-      markRunning(address);
       try {
         const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
         markSuccess(address, nowSec() + Math.floor(config.crawlIntervalMs / 1000));

@@ -43,7 +43,8 @@ export function queued(): string[] {
 /**
  * Stop crawling a community. Its row and everything already archived for it
  * stay; only the schedule goes. A pass already running finishes, and its
- * markSuccess/markFailed then matches no row.
+ * markSuccess/markFailed then matches no row; one still waiting in a tick's
+ * batch fails markRunning and is skipped.
  */
 export function dequeue(address: string): void {
   getDb().prepare('DELETE FROM crawl_queue WHERE community_address = ?').run(address);
@@ -85,10 +86,13 @@ export function reclaimAbandoned(): number {
     .run({ now: nowSec() }).changes;
 }
 
-export function markRunning(address: string): void {
-  getDb()
-    .prepare(`UPDATE crawl_queue SET status = 'running', started_at = @now WHERE community_address = @address`)
-    .run({ address, now: nowSec() });
+/** Claim a row for a pass. False when it is no longer scheduled (dequeued since due() ran). */
+export function markRunning(address: string): boolean {
+  return (
+    getDb()
+      .prepare(`UPDATE crawl_queue SET status = 'running', started_at = @now WHERE community_address = @address`)
+      .run({ address, now: nowSec() }).changes > 0
+  );
 }
 
 export function markSuccess(address: string, nextRunAt: number): void {
