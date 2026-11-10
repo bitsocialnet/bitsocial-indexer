@@ -5,6 +5,7 @@ import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
 const {
+  applyNsfwSignals,
   getCommunity,
   getThread,
   insertComments,
@@ -417,6 +418,37 @@ test('an update that omits nsfw never un-flags an already-flagged comment', () =
   assert.equal(getThread(cid)?.post.nsfw, 1);
   assert.equal(getThread(cid)?.post.upvote_count, 3, 'the rest of the update still applied');
   assert.equal(searchPosts({ q: 'serval', nsfw: false }).total, 0);
+});
+
+test('a flagged comment that stops being served no longer infers its community NSFW', () => {
+  // Undeclared and in no directory, so inference is the only signal left.
+  const community = 'nsfw-tombstone.bso';
+  upsertCommunity({ address: community, last_indexed_at: now });
+  for (const [state, change] of [
+    ['mod-removed', { removed: true }],
+    ['author-deleted', { deleted: true }],
+    ['back in the mod queue', { pending_approval: true }],
+  ] as const) {
+    const cid = `nsfw-tombstone-${state}`;
+    insertComments([makeComment({ cid, community_address: community, content: 'tombstoned margay', nsfw: true })]);
+    applyNsfwSignals();
+    assert.equal(getCommunity(community)?.nsfw, 1, 'a served flagged comment infers NSFW');
+
+    insertComments([makeComment({ cid, community_address: community, ...change })]);
+    applyNsfwSignals();
+    assert.equal(getCommunity(community)?.nsfw, 0, `a ${state} flagged comment no longer counts`);
+  }
+
+  const taken = 'nsfw-tombstone-takedown';
+  insertComments([makeComment({ cid: taken, community_address: community, content: 'tombstoned margay', nsfw: true })]);
+  applyNsfwSignals();
+  assert.equal(getCommunity(community)?.nsfw, 1);
+  // No crawl in between: the blocklist re-resolves on its own, so restoring a
+  // flagged comment re-raises its community before the next crawl pass.
+  setBlocklist([{ cid: taken, scope: 'comment', reason: null }]);
+  assert.equal(getCommunity(community)?.nsfw, 0, 'a taken-down flagged comment no longer counts');
+  setBlocklist([]);
+  assert.equal(getCommunity(community)?.nsfw, 1, 'restoring it brings the inference back');
 });
 
 test('stats count only servable comments', () => {

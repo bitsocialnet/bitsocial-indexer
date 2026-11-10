@@ -373,8 +373,9 @@ export function getCommunity(address: string): CommunitySummary | undefined {
  *   3. `directorySafeForWork` — the `features.safeForWork` of the directory the
  *      address is listed under (DIRECTORY_DEFAULTS_SOURCE), for a community
  *      whose owner never set the feature.
- *   4. `inferred`             — any indexed comment carries the protocol's
- *      `nsfw` flag, so the community accepts NSFW content.
+ *   4. `inferred`             — any served comment (not a tombstone or in the
+ *      mod queue) carries the protocol's `nsfw` flag, so the community accepts
+ *      NSFW content.
  *
  * Signals 2 and 3 are held in `safeForWork` polarity all the way here, exactly
  * like 5chan does: `undefined` (never declared) has to stay distinguishable
@@ -428,10 +429,17 @@ const storedSafeForWork = (value: number | null): boolean | undefined =>
  */
 export function applyNsfwSignals(): void {
   const database = getDb();
+  // Only comments still served count. A flagged post that moderators removed
+  // (or its author deleted, or the operator took down) is not content the
+  // community carries, and counting it would pin the community NSFW for good:
+  // a comment's own flag never clears (see insertComments).
   const inferred = new Set(
     (
       database
-        .prepare('SELECT DISTINCT community_address AS address FROM comments WHERE nsfw = 1')
+        .prepare(
+          `SELECT DISTINCT community_address AS address FROM comments
+            WHERE nsfw = 1 AND pending_approval = 0 AND removed = 0 AND deleted = 0 AND takedown = 0`,
+        )
         .all() as { address: string }[]
     ).map((r) => r.address),
   );
@@ -623,6 +631,10 @@ export function setBlocklist(entries: BlocklistEntry[]): void {
       }
     }
   })();
+  // A taken-down comment no longer counts towards NSFW inference, so the
+  // change applies now rather than at the next crawl pass. Otherwise
+  // restoring a flagged comment would leave its community lowered meanwhile.
+  applyNsfwSignals();
 }
 
 // ── search ───────────────────────────────────────────────────────────────────

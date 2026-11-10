@@ -139,8 +139,10 @@ precedence first**:
    signal decides.
 3. **The directory the address is listed under** — `DIRECTORY_DEFAULTS_SOURCE`
    (below), for the many communities whose owner never set the feature.
-4. **Inference from content** — any indexed comment in the community carrying
-   the protocol's `nsfw` flag means the community accepts NSFW content.
+4. **Inference from content** — any served comment in the community carrying
+   the protocol's `nsfw` flag means the community accepts NSFW content. A
+   flagged comment that was removed, deleted, taken down or sent back to the mod
+   queue no longer counts.
 
 An unset `safeForWork` is never read as either verdict: it falls through, and
 only the last signal (inference) is allowed to answer with a plain boolean.
