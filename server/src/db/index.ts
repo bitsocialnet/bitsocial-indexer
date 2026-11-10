@@ -416,6 +416,13 @@ export interface NsfwOverride {
  */
 let nsfwOverrides = new Map<string, boolean>();
 let directorySafeForWork = new Map<string, boolean>();
+/**
+ * False while some of DIRECTORY_DEFAULTS_SOURCE has not been read: from startup
+ * until the crawler has fetched the lists (the server is already serving by
+ * then), and after a read that missed a list. Until then the map is not the
+ * whole answer for any address.
+ */
+let directoryComplete = !config.directoryDefaultsSource;
 
 /** A stored `safe_for_work` cell back as the three-state flag it represents. */
 const storedSafeForWork = (value: number | null): boolean | undefined =>
@@ -452,14 +459,18 @@ export function applyNsfwSignals(): void {
 
   database.transaction(() => {
     for (const row of rows) {
-      const next = resolveNsfw({
+      const signals: NsfwSignals = {
         override: nsfwOverrides.get(row.address),
         safeForWork: storedSafeForWork(row.safe_for_work),
         directorySafeForWork: directorySafeForWork.get(row.address),
         inferred: inferred.has(row.address),
-      })
-        ? 1
-        : 0;
+      };
+      // Not read yet is not "listed nowhere": a list not read yet may name the
+      // address NSFW, and the stricter directory verdict wins. Unless a signal
+      // that outranks the directory decides, keep a stored NSFW verdict instead
+      // of lowering it on what was read so far.
+      const awaitingDirectory = !directoryComplete && signals.override === undefined && signals.safeForWork === undefined;
+      const next = (resolveNsfw(signals) || (awaitingDirectory && row.nsfw === 1)) ? 1 : 0;
       if (next !== row.nsfw) update.run({ address: row.address, nsfw: next });
     }
   })();
@@ -475,12 +486,15 @@ export function setNsfwOverrides(entries: NsfwOverride[]): void {
  * Apply the directory-level `features.safeForWork` flags, already joined to
  * addresses (see crawler/crawler.ts). An address listed under two directories
  * takes the stricter verdict — one NSFW directory is enough to keep it out of a
- * safe-default search.
+ * safe-default search. `complete` is false when some directory's list could not
+ * be read: NSFW verdicts among the entries apply at once, but no stored NSFW
+ * verdict is lowered until a complete read (see applyNsfwSignals).
  */
-export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[]): void {
+export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[], complete = true): void {
   const next = new Map<string, boolean>();
   for (const { address, safeForWork } of entries) next.set(address, (next.get(address) ?? true) && safeForWork);
   directorySafeForWork = next;
+  directoryComplete = complete;
   applyNsfwSignals();
 }
 

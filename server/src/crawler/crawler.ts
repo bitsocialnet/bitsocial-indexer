@@ -173,6 +173,12 @@ export interface DirectorySafeForWork {
   safeForWork: boolean;
 }
 
+export interface DirectoryRead {
+  entries: DirectorySafeForWork[];
+  /** False when some directory's address list could not be read. */
+  complete: boolean;
+}
+
 const DEFAULTS_SUFFIX = '-directories-defaults.json';
 
 /** One address-list fetch per directory code — 5chan currently has 64 of them. */
@@ -200,20 +206,26 @@ export function parseDirectoryDefaults(data: unknown): Map<string, boolean> {
   return found;
 }
 
-/** Join DIRECTORY_DEFAULTS_SOURCE's per-code verdicts onto community addresses. */
+/**
+ * Join DIRECTORY_DEFAULTS_SOURCE's per-code verdicts onto community addresses.
+ * `null` when the defaults file could not be read: like an unreadable
+ * COMMUNITIES_SOURCE, that is no answer, not an empty directory.
+ */
 export async function resolveDirectorySafeForWork(
   source = config.directoryDefaultsSource,
-): Promise<DirectorySafeForWork[]> {
-  if (!source) return [];
+): Promise<DirectoryRead | null> {
+  if (!source) return { entries: [], complete: true };
   let defaults: Map<string, boolean>;
   try {
     defaults = parseDirectoryDefaults(await loadJson(source));
   } catch (err) {
-    console.error(`[crawler] failed to load DIRECTORY_DEFAULTS_SOURCE (${source}):`, err);
-    return [];
+    // One line, not a stack: during an outage this repeats on every retry.
+    console.error(`[crawler] failed to load DIRECTORY_DEFAULTS_SOURCE (${source}): ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 
   const entries: DirectorySafeForWork[] = [];
+  let complete = true;
   await runWithConcurrency([...defaults], DIRECTORY_CONCURRENCY, async ([code, safeForWork]) => {
     const listSource = directoryListSource(source, code);
     if (!listSource) return;
@@ -224,10 +236,34 @@ export async function resolveDirectorySafeForWork(
       }
     } catch (err) {
       // One unreachable directory file must not cost the others their verdict.
+      complete = false;
       console.error(`[crawler] directory ${code}: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
-  return entries;
+  return { entries, complete };
+}
+
+let reloadingDirectory = false;
+
+/**
+ * Read DIRECTORY_DEFAULTS_SOURCE and apply it. Resolves true once every list
+ * was read. A failed read changes nothing, so the verdicts already applied (or,
+ * at startup, the ones stored last run) stand. Exported for tests.
+ */
+export async function reloadDirectory(source = config.directoryDefaultsSource): Promise<boolean> {
+  if (reloadingDirectory) return false;
+  reloadingDirectory = true;
+  try {
+    const directory = await resolveDirectorySafeForWork(source);
+    if (!directory) return false;
+    if (directory.entries.length) {
+      console.log(`[crawler] ${directory.entries.length} addresses carry a directory safeForWork verdict`);
+    }
+    setDirectorySafeForWork(directory.entries, directory.complete);
+    return directory.complete;
+  } finally {
+    reloadingDirectory = false;
+  }
 }
 
 // ── mapping: pkc-js comment → CommentInput ───────────────────────────────────
@@ -468,6 +504,7 @@ export async function tick(): Promise<void> {
 
 let timer: NodeJS.Timeout | undefined;
 let reloadTimer: NodeJS.Timeout | undefined;
+let directoryTimer: NodeJS.Timeout | undefined;
 
 export async function startCrawler(): Promise<void> {
   if (!hasConfiguredCommunities()) {
@@ -488,10 +525,16 @@ export async function startCrawler(): Promise<void> {
     if (removed.length) console.log(`[crawler] ${removed.length} communities left the list and are no longer crawled`);
   }
   // The directory verdicts outrank inference, so apply them before the first
-  // pass rather than after it.
-  const directory = await resolveDirectorySafeForWork();
-  if (directory.length) console.log(`[crawler] ${directory.length} addresses carry a directory safeForWork verdict`);
-  setDirectorySafeForWork(directory);
+  // pass rather than after it. A read that missed any list is retried on the
+  // reload interval until every list has been read.
+  if (!(await reloadDirectory())) {
+    directoryTimer = setInterval(() => {
+      void reloadDirectory().then((complete) => {
+        if (complete) clearInterval(directoryTimer);
+      });
+    }, config.communitiesReloadMs);
+    console.log(`[crawler] retrying DIRECTORY_DEFAULTS_SOURCE every ${config.communitiesReloadMs}ms until it is read`);
+  }
   const reclaimed = reclaimAbandoned();
   if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
   console.log(
@@ -508,4 +551,5 @@ export async function startCrawler(): Promise<void> {
 export function stopCrawler(): void {
   if (timer) clearInterval(timer);
   if (reloadTimer) clearInterval(reloadTimer);
+  if (directoryTimer) clearInterval(directoryTimer);
 }

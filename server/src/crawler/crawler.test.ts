@@ -190,15 +190,16 @@ test('resolveDirectorySafeForWork joins the defaults onto every listed address',
   write('5chan-3-directory.json', { boards: [{ address: '3dcg.bso' }] });
   write('5chan-trash-directory.json', { boards: [{ address: 'off-topic.bso' }] });
 
-  const entries = await resolveDirectorySafeForWork(defaults);
+  const read = await resolveDirectorySafeForWork(defaults);
   assert.deepEqual(
-    entries.sort((a, b) => a.address.localeCompare(b.address)),
+    read?.entries.sort((a, b) => a.address.localeCompare(b.address)),
     [
       { address: '3dcg.bso', safeForWork: true },
       { address: 'flash-posting.bso', safeForWork: false },
       { address: 'flash-two.bso', safeForWork: false },
     ],
   );
+  assert.equal(read?.complete, false, "the missing list is reported, so its addresses' stored verdicts stand");
 });
 
 test('resolveDirectorySafeForWork also reads the seedit `communities` shape', async () => {
@@ -213,14 +214,15 @@ test('resolveDirectorySafeForWork also reads the seedit `communities` shape', as
     JSON.stringify({ directoryCode: 'memes', communities: [{ address: 'memes.bso', publicKey: '12D3Koo' }] }),
   );
 
-  assert.deepEqual(await resolveDirectorySafeForWork(join(dir, 'seedit-directories-defaults.json')), [
-    { address: 'memes.bso', safeForWork: true },
-  ]);
+  assert.deepEqual(await resolveDirectorySafeForWork(join(dir, 'seedit-directories-defaults.json')), {
+    entries: [{ address: 'memes.bso', safeForWork: true }],
+    complete: true,
+  });
 });
 
-test('resolveDirectorySafeForWork stays silent when unconfigured or unreadable', async () => {
-  assert.deepEqual(await resolveDirectorySafeForWork(''), []);
-  assert.deepEqual(await resolveDirectorySafeForWork('/nonexistent/5chan-directories-defaults.json'), []);
+test('resolveDirectorySafeForWork: unconfigured is an empty directory, unreadable is no answer', async () => {
+  assert.deepEqual(await resolveDirectorySafeForWork(''), { entries: [], complete: true });
+  assert.equal(await resolveDirectorySafeForWork('/nonexistent/5chan-directories-defaults.json'), null);
 });
 
 test('mapComment groups legacy publications under the configured canonical address', () => {

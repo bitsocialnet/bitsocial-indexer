@@ -77,7 +77,7 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 |-----|---------|---------|
 | `COMMUNITIES` | _(empty)_ | Comma-separated community addresses to index, e.g. `art.bso,tech.bso` |
 | `COMMUNITIES_SOURCE` | _(empty)_ | URL/path to a JSON list of community addresses (e.g. a client's directory). Overrides/augments `COMMUNITIES`. |
-| `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). |
+| `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). Also how often a failed `DIRECTORY_DEFAULTS_SOURCE` read is retried. |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
 | `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
@@ -168,7 +168,12 @@ DIRECTORY_DEFAULTS_SOURCE=https://raw.githubusercontent.com/bitsocialnet/lists/m
 Sibling file names follow the convention that repo documents, so one setting
 reaches every directory. A directory that states no `safeForWork`, or an address
 in no directory at all, contributes nothing and falls through to inference. Both
-files are read once, when the crawler schedules its communities.
+files are read once, when the crawler schedules its communities. A read that
+fails (the defaults file, or any directory's list) is retried every
+`COMMUNITIES_RELOAD_MS` until every list has been read. Until then, after a
+restart too, NSFW verdicts apply as they are read but none is lowered: a
+community keeps the NSFW flag stored from the last run unless its operator
+override or its own `safeForWork` says otherwise.
 
 `GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
 anything NSFW — the comment is flagged, or its community is — and `true`
