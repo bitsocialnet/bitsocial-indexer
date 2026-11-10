@@ -38,7 +38,10 @@ export const getCommunities = (revalidate = 300) => get<{ communities: Community
 export const getCommunity = (address: string) =>
   get<Community>(`/api/communities/${encodeURIComponent(address)}`, 300);
 export const getPosts = (query = '', revalidate = 60) => get<PostPage>(`/api/posts${query}`, revalidate);
-export const getThread = (cid: string) => get<Thread>(`/api/posts/${encodeURIComponent(cid)}`, 300);
+// Uncached: Next serves a data-cache entry once more after its TTL expires (and
+// keeps serving it while the refetch fails), so a cached thread would outlive
+// a takedown or removal the API already redacts. The API read is one SQLite query.
+export const getThread = (cid: string) => get<Thread>(`/api/posts/${encodeURIComponent(cid)}`);
 // `nsfw` is always sent: the API excludes NSFW when the parameter is absent, so
 // leaving it off would make every instance inherit that default silently. See
 // SHOW_NSFW in lib/site.ts.

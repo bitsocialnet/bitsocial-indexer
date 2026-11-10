@@ -7,9 +7,6 @@ import { getThread } from '@/lib/api';
 import { excerpt, timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
 
-// Threads are archived content: cache the page, revalidate for late replies.
-export const revalidate = 300;
-
 type Params = { params: Promise<{ cid: string }> };
 
 function score(c: Comment) {
