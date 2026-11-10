@@ -99,6 +99,35 @@ test("completed flows pair even when advisory semantic checks did not pass; fail
   );
 });
 
+test("adapter modes list only measured pairs, never runs that failed before observing", () => {
+  const run = (transport, extra = {}) => ({
+    case: "a",
+    sample: 0,
+    transport,
+    mode: "deterministic",
+    status: "completed",
+    actions: [],
+    assertions: [true],
+    lifecycleMs: 100,
+    controlCalls: 1,
+    adapterMode: transport === "old" ? "legacy-separate" : "combined-aria",
+    ...extra,
+  });
+  const [summary] = summarizePairs([
+    run("old"),
+    run("combined"),
+    run("old", { sample: 1 }),
+    run("combined", {
+      sample: 1,
+      status: "incomplete",
+      reason: "browser_command_failed",
+      adapterMode: "unknown",
+    }),
+  ]);
+  assert.equal(summary.pairs, 2);
+  assert.deepEqual(summary.combinedAdapterModes, ["combined-aria"]);
+});
+
 test("SIGTERM during a live benchmark closes the owned browser and releases the shared slot", async () => {
   const run = await runWithFakeCli(benchmark, liveArgs, "hang");
   try {

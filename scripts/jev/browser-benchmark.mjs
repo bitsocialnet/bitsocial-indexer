@@ -77,7 +77,7 @@ export function summarizePairs(runs) {
       pairs: selected.length,
       comparablePairs: comparable.length,
       combinedAdapterModes: [
-        ...new Set(selected.map((pair) => pair.combined?.adapterMode).filter(Boolean)),
+        ...new Set(comparable.map((pair) => pair.combined.adapterMode).filter(Boolean)),
       ],
       oldMedianMs: median(comparable.map((pair) => pair.old.lifecycleMs)),
       combinedMedianMs: median(comparable.map((pair) => pair.combined.lifecycleMs)),

@@ -154,7 +154,8 @@ export function createPlaywrightDriver({ execute = execCommand } = {}) {
     started,
     opened,
     closing,
-    combinedObservation = false,
+    // "unknown" until the capability probe proves which observation transport is usable.
+    observationMode = "unknown",
     opening = false;
   const childEnv = { ...process.env };
   delete childEnv.TYPESAFE_API_KEY;
@@ -211,7 +212,7 @@ export function createPlaywrightDriver({ execute = execCommand } = {}) {
   }
   return {
     get adapterMode() {
-      return combinedObservation ? "combined-aria" : "snapshot-command";
+      return observationMode;
     },
     async open(validatedPlan) {
       plan = validatedPlan;
@@ -250,10 +251,10 @@ export function createPlaywrightDriver({ execute = execCommand } = {}) {
         await page.goto(${JSON.stringify(plan.url)}, {waitUntil: 'domcontentloaded'});
         return {ariaSnapshot: typeof page.ariaSnapshot === 'function'};
       `);
-      combinedObservation = capabilities?.ariaSnapshot === true;
+      observationMode = capabilities?.ariaSnapshot === true ? "combined-aria" : "snapshot-command";
     },
     async observe(assertions = []) {
-      if (combinedObservation) {
+      if (observationMode === "combined-aria") {
         const observation = await code(`${guard()}
           const snapshot = await page.ariaSnapshot({mode: 'ai'});
           ${assertionCode(assertions)}
@@ -267,7 +268,7 @@ export function createPlaywrightDriver({ execute = execCommand } = {}) {
           /\[ref=[a-zA-Z0-9_-]+\]/.test(observation.snapshot)
         )
           return observation;
-        combinedObservation = false;
+        observationMode = "snapshot-command";
       }
       // Older installed CLIs keep their supported snapshot command. Never substitute
       // a ref-less default ARIA snapshot or silently retry a failing combined call.

@@ -323,6 +323,19 @@ test("a cleanup failure keeps the run's own failure reason and is flagged separa
   assert.equal(clean.cleanupFailed, false);
 });
 
+test("a run that ends before its first observation reports an unknown adapter mode", async () => {
+  const driver = createPlaywrightDriver({
+    execute: async (_file, args) => {
+      if (args[0] === "open") throw Object.assign(new Error("slot held"), { code: 75 });
+      throw new Error("no command may follow a refused open");
+    },
+  });
+  assert.equal(driver.adapterMode, "unknown");
+  const report = await runBrowserPlan(basePlan(), { driver, baseline: true });
+  assert.equal(report.reason, "browser_slot_busy");
+  assert.equal(report.adapterMode, "unknown");
+});
+
 test("browser commands never inherit the key, model or credential-location overrides", async () => {
   const names = ["TYPESAFE_API_KEY", "TYPESAFE_API_KEY_FILE", "JEV_CONFIG_FILE", "JEV_MODEL"];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
