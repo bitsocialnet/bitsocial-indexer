@@ -315,6 +315,7 @@ export async function runBrowserPlan(
     assertions: [],
     semantic: [],
     semanticStatus: "not_requested",
+    cleanupFailed: false,
   };
   const withinDeadline = () => {
     if (now() - started >= plan.limits.deadlineMs) fail("deadline_exceeded");
@@ -483,8 +484,10 @@ export async function runBrowserPlan(
     try {
       await driver.close();
     } catch {
+      // Cleanup is flagged separately so it never hides why an already failed run stopped.
+      if (report.status === "completed") report.reason = "cleanup_failed";
       report.status = "incomplete";
-      report.reason = "cleanup_failed";
+      report.cleanupFailed = true;
     }
   }
   return {

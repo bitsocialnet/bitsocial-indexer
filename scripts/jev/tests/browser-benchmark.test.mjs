@@ -162,6 +162,21 @@ for (const { name, mode, interrupt, status, expectedCalls } of [
     }
   });
 
+test("a failed cleanup after a failed flow still stops the benchmark and keeps the flow's reason", async () => {
+  const run = await runWithFakeCli(benchmark, liveArgs, "fail");
+  try {
+    const { code, stdout } = await run.exited;
+    assert.equal(code, 2);
+    const output = JSON.parse(stdout);
+    assert.equal(output.interrupted, "cleanup_failed");
+    assert.equal(output.runs.length, 1);
+    assert.equal(output.runs[0].reason, "browser_result_missing");
+    assert.equal(output.runs[0].cleanupFailed, true);
+  } finally {
+    await run.cleanup();
+  }
+});
+
 test("benchmark rejects empty scopes and excessive samples or model budgets before launching anything", async () => {
   await assert.rejects(main([]), /invalid_benchmark_options/);
   for (const args of [

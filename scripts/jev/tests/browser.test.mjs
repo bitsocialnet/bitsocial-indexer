@@ -294,6 +294,35 @@ test("closing during a wrapper open waits for it, closes once and starts no furt
   assert.deepEqual(calls, ["open", "close"]);
 });
 
+test("a cleanup failure keeps the run's own failure reason and is flagged separately", async () => {
+  const close = async () => {
+    throw Error("private details");
+  };
+  const drift = await runBrowserPlan(basePlan(), {
+    driver: fixtureDriver({
+      observe: async () => ({ url: "https://example.com", snapshot: snapshots[0] }),
+      close,
+    }),
+    baseline: true,
+  });
+  assert.equal(drift.status, "incomplete");
+  assert.equal(drift.reason, "origin_changed");
+  assert.equal(drift.cleanupFailed, true);
+  const plan = basePlan();
+  plan.semanticChecks = [
+    { id: "clarity", role: "status", name: "", criterion: "Explains next action" },
+  ];
+  const semantic = await runBrowserPlan(plan, {
+    driver: fixtureDriver({ close }),
+    baseline: true,
+  });
+  assert.equal(semantic.flowCompleted, true);
+  assert.equal(semantic.reason, "semantic_not_run");
+  assert.equal(semantic.cleanupFailed, true);
+  const clean = await runBrowserPlan(basePlan(), { driver: fixtureDriver(), baseline: true });
+  assert.equal(clean.cleanupFailed, false);
+});
+
 test("browser commands never inherit the key, model or credential-location overrides", async () => {
   const names = ["TYPESAFE_API_KEY", "TYPESAFE_API_KEY_FILE", "JEV_CONFIG_FILE", "JEV_MODEL"];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));

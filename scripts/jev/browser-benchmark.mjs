@@ -180,6 +180,7 @@ export async function benchmarkRun(plan, { createDriver, runPlan, client, baseli
     status: report.status,
     reason: report.reason,
     flowCompleted: report.flowCompleted,
+    cleanupFailed: report.cleanupFailed,
     actions: report.actions,
     assertions: report.assertions,
     staleReplans: report.staleReplans,
@@ -311,13 +312,14 @@ export async function main(argv = process.argv.slice(2)) {
             controlCalls: run.controlCalls,
           }),
         );
-        if (["browser_slot_busy", "cleanup_failed"].includes(run.reason)) {
+        // A failed cleanup keeps the run's own reason; retained helper trees still replace it.
+        if (run.cleanupFailed || ["browser_slot_busy", "cleanup_failed"].includes(run.reason)) {
           console.log(
             JSON.stringify(
               {
                 runs,
                 summary: summarizePairs(runs),
-                interrupted: run.reason,
+                interrupted: run.cleanupFailed ? "cleanup_failed" : run.reason,
                 usage: client?.stats() || null,
               },
               null,
