@@ -91,6 +91,30 @@ current_owner() {
   fi
 }
 
+# Prints what tells one lock apart from a later lock at the same path, for the
+# given lock directory (default: the current one).
+lock_identity() {
+  local dir="${1:-$lock_dir}" name value
+
+  for name in owner started-at pid; do
+    value=''
+    { IFS= read -r value <"$dir/$name"; } 2>/dev/null || true
+    printf '%s=%s;' "$name" "$value"
+  done
+}
+
+# True when the lock directory `dir` is still the one identified as
+# `expected`. An empty identity cannot tell a lock whose creator died right
+# after mkdir from one another contender has only just created (or from no
+# lock at all), so it only matches a directory that is still old.
+lock_matches() {
+  local dir="$1" expected="$2"
+
+  [ "$(lock_identity "$dir")" = "$expected" ] || return 1
+  [ "$expected" != 'owner=;started-at=;pid=;' ] ||
+    [ -n "$(find "$dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]
+}
+
 # Echoes `live`, `dead`, or `unknown` for a session name. `unknown` means the
 # browser list could not be read, and callers must treat the lock as held.
 session_state() {
@@ -213,19 +237,47 @@ print_status() {
   esac
 }
 
-# Atomically drop a lock we have confirmed is stale. Renaming first means only
-# one racing reclaimer can win, so a concurrent fresh lock is never deleted.
-reclaim_stale_lock() {
-  local owner="$1" staged="${lock_dir}.stale.$$"
+# Takes the lock out of service with one rename, then checks that the renamed
+# lock is the one the caller judged (`expected`, from lock_identity). A newer
+# lock that took its place in between is put back instead of being deleted.
+remove_lock_if() {
+  local expected="$1" staged="${lock_dir}.$2.$$" name
 
-  if mv "$lock_dir" "$staged" 2>/dev/null; then
+  rm -rf "$staged"
+  if ! mv "$lock_dir" "$staged" 2>/dev/null; then
+    return 1
+  fi
+  if lock_matches "$staged" "$expected"; then
     rm -rf "$staged"
+    return 0
+  fi
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    for name in pid owner started-at workspace; do
+      if [ -e "$staged/$name" ]; then
+        mv "$staged/$name" "$lock_dir/$name"
+      fi
+    done
+  else
+    echo "pw-session: warning: could not restore a lock renamed by mistake; another session took the slot first" >&2
+  fi
+  rm -rf "$staged"
+  return 1
+}
+
+# Drops a lock judged stale, but only that exact lock: reading `list --all`
+# takes a while, and meanwhile another contender may have reclaimed it and
+# acquired a fresh lock at the same path.
+reclaim_stale_lock() {
+  local owner="$1" expected="$2"
+
+  if lock_matches "$lock_dir" "$expected" && remove_lock_if "$expected" stale; then
     echo "pw-session: reclaimed stale slot from '$owner' (its browser is no longer running)" >&2
   fi
 }
 
 acquire() {
-  local session="$1" wait_seconds="$2" owner state reclaims=0
+  local session="$1" wait_seconds="$2" identity owner state reclaims=0
 
   validate_session "$session"
   mkdir -p "$(dirname "$lock_dir")"
@@ -238,13 +290,16 @@ acquire() {
       return 0
     fi
 
+    # Identity first: if the lock changes before the owner is read, the
+    # verdict below then belongs to a newer lock and reclaim leaves it alone.
+    identity="$(lock_identity)"
     owner="$(current_owner)"
     state="$(lock_state "$owner")"
 
     # Bounded so an unremovable lock directory fails loudly instead of spinning.
     if [ "$state" = dead ] && [ "$reclaims" -lt 3 ]; then
       reclaims=$((reclaims + 1))
-      reclaim_stale_lock "${owner:-unknown}"
+      reclaim_stale_lock "${owner:-unknown}" "$identity"
       continue
     fi
 
@@ -271,7 +326,7 @@ acquire() {
 }
 
 release() {
-  local session="$1" owner
+  local session="$1" identity owner
 
   validate_session "$session"
   if [ ! -d "$lock_dir" ]; then
@@ -279,6 +334,7 @@ release() {
     return 0
   fi
 
+  identity="$(lock_identity)"
   owner="$(current_owner)"
   if [ "$owner" != "$session" ]; then
     echo "pw-session: '$session' cannot release the slot held by '${owner:-unknown}'" >&2
@@ -288,8 +344,12 @@ release() {
     return 1
   fi
 
-  rm -f "$owner_file" "$started_file" "$workspace_file" "$pid_file"
-  rmdir "$lock_dir"
+  # One rename removes the whole lock, so no contender sees it half-deleted,
+  # and a lock that replaced ours after the check above stays in place.
+  if ! remove_lock_if "$identity" release; then
+    echo "pw-session: the slot changed hands while '$session' released it; left it untouched" >&2
+    return 1
+  fi
   echo "pw-session: released browser slot for '$session'"
 }
 
