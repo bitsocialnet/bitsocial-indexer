@@ -436,6 +436,12 @@ export async function tick(): Promise<void> {
   // two would compete for the same due rows.
   if (ticking) return;
   ticking = true;
+  // Every row this pass settles comes due one interval after the pass began,
+  // when the interval timer fires next. Counted from each crawl's end instead,
+  // a row came due a few seconds after that tick, waited for the one after it,
+  // and was refreshed every other interval. One second short of a full
+  // interval absorbs the drift between the timer's clock and Date.now().
+  const nextRunAt = nowSec() + Math.floor(config.crawlIntervalMs / 1000) - 1;
   let crawled = 0;
   try {
     await runWithConcurrency(due(), config.crawlConcurrency, async (row) => {
@@ -445,7 +451,7 @@ export async function tick(): Promise<void> {
       crawled++;
       try {
         const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
-        markSuccess(address, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
+        markSuccess(address, nextRunAt);
         if (n) console.log(`[crawler] ${address}: indexed ${n} new comments`);
       } catch (err) {
         if (err instanceof CrawlTimeoutError) {
@@ -455,7 +461,7 @@ export async function tick(): Promise<void> {
         }
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[crawler] ${address}: ${message}`);
-        markFailed(address, message, nowSec() + Math.floor(config.crawlIntervalMs / 1000));
+        markFailed(address, message, nextRunAt);
       }
     });
   } finally {

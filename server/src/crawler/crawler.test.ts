@@ -501,3 +501,52 @@ test('a pass skips a community a reload dropped after the pass built its batch',
     setPkcClientForTest(null);
   }
 });
+
+const queueRow = (address: string) =>
+  getDb().prepare('SELECT status, last_error FROM crawl_queue WHERE community_address = ?').get(address) as
+    | { status: string; last_error: string | null }
+    | undefined;
+
+test('a community crawled in one pass is due again at the next tick, one interval after the pass began', async (t) => {
+  for (const address of queued()) dequeue(address);
+  const passStart = 1_700_000_000_000;
+  let now = passStart;
+  t.mock.method(Date, 'now', () => now);
+  const crawled: string[] = [];
+  // A pass recycles its client, so each pass gets a fresh one.
+  const install = () =>
+    setPkcClientForTest(
+      Promise.resolve({
+        getCommunity: async (address: string) => {
+          crawled.push(address);
+          // A crawl takes a few seconds, so it settles well after the tick began.
+          now += 3_000;
+          if (address === 'cadence-failing.bso') throw new Error('daemon said no');
+          return { posts: { pages: { new: { comments: [] } } } };
+        },
+        getComment: async () => ({}),
+        destroy: async () => {},
+      }),
+    );
+  try {
+    enqueue('cadence-ok.bso');
+    enqueue('cadence-failing.bso');
+    install();
+    await tick();
+    assert.equal(crawled.length, 2);
+    assert.equal(queueRow('cadence-failing.bso')?.status, 'failed');
+
+    // The interval timer fires next one interval after this pass began.
+    now = passStart + config.crawlIntervalMs;
+    install();
+    await tick();
+    assert.deepEqual(
+      crawled.sort(),
+      ['cadence-failing.bso', 'cadence-failing.bso', 'cadence-ok.bso', 'cadence-ok.bso'],
+      'both communities are refreshed at the next tick, not the one after it',
+    );
+  } finally {
+    setPkcClientForTest(null);
+    for (const address of queued()) dequeue(address);
+  }
+});
