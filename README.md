@@ -110,8 +110,11 @@ defaults to `comment`; `thread` takes down a post **and all its replies** by
 the post's CID). Add a CID to the file and it is redacted within a minute —
 the file is re-read whenever it changes, no restart needed; remove the entry
 and the stored content is served again (the redaction never destroys the
-archived data). Blocklisted comments leave listings and search but stay in
-threads as redacted tombstones, marked `takedown: 1` (plus the optional
+archived data). A file that will not load (invalid JSON, unreadable, or behind
+a directory the server cannot read) keeps the last list that loaded; only a
+file that no longer exists empties the list. At startup there is no list to
+keep, so the server refuses to start until the file loads. Blocklisted
+comments leave listings and search but stay in threads as redacted tombstones, marked `takedown: 1` (plus the optional
 `takedown_reason`) on the API so UIs can distinguish them from upstream
 moderation, and they stay redacted across re-crawls. The bundled web UI shows
 them as `[removed — takedown request]` and documents the policy on its
@@ -133,7 +136,8 @@ precedence first**:
    is a bare address or `{ "address": "…", "nsfw": false, "reason": "…" }`.
    `nsfw` defaults to `true`, and an explicit `false` clears the flag, so a bad
    verdict is correctable. Like the blocklist, the file is re-read whenever it
-   changes — no restart needed.
+   changes — no restart needed — and a file that exists but will not load stops
+   the server from starting.
 2. **`community.features.safeForWork`** — the owner's own declaration, read off
    the community on every crawl. `false` → NSFW, `true` → not, unset → the next
    signal decides.

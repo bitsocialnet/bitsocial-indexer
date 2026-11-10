@@ -56,30 +56,43 @@ export async function loadNsfwOverrides(path: string): Promise<NsfwOverride[]> {
 let lastMtimeMs: number | null = null; // null = never checked, -1 = file absent
 let timer: NodeJS.Timeout | undefined;
 
-/** Check the file's mtime and (re)apply it when it changed. Exported for tests. */
-export async function pollNsfwOverrides(source = config.nsfwOverridesSource): Promise<void> {
-  if (!source) return;
+/**
+ * Check the file's mtime and (re)apply it when it changed. Resolves false when
+ * the file could not be loaded for any reason other than being absent.
+ * Exported for tests.
+ */
+export async function pollNsfwOverrides(source = config.nsfwOverridesSource): Promise<boolean> {
+  if (!source) return true;
   let mtimeMs: number;
   try {
     mtimeMs = (await stat(source)).mtimeMs;
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      // The file may still be there (a permission or I/O error on its path):
+      // keep the previous overrides, as for a file that will not parse.
+      console.error(`[nsfw] cannot check ${source}:`, err);
+      return false;
+    }
     // Missing file = no overrides (deleting the file drops back to the lists).
     if (lastMtimeMs !== -1) {
       if (lastMtimeMs !== null) console.log(`[nsfw] ${source} is gone — overrides cleared`);
       lastMtimeMs = -1;
       setNsfwOverrides([]);
     }
-    return;
+    return true;
   }
-  if (mtimeMs === lastMtimeMs) return;
+  if (mtimeMs === lastMtimeMs) return true;
   try {
     const entries = await loadNsfwOverrides(source);
     lastMtimeMs = mtimeMs;
     setNsfwOverrides(entries);
     console.log(`[nsfw] applied ${entries.length} overrides from ${source}`);
+    return true;
   } catch (err) {
     // A broken file keeps the previous overrides; retried on the next poll.
     console.error(`[nsfw] failed to load ${source}:`, err);
+    return false;
   }
 }
 
@@ -89,7 +102,14 @@ export async function startNsfwOverrides(): Promise<void> {
     setNsfwOverrides([]); // clear overrides left over from a previous configuration
     return;
   }
-  await pollNsfwOverrides();
+  // Fail closed. At startup there is no previous set to keep, and the next
+  // re-resolution (any crawl) would drop every operator verdict, putting
+  // communities the operator marked NSFW back into the default search.
+  if (!(await pollNsfwOverrides())) {
+    throw new Error(
+      `NSFW_OVERRIDES_SOURCE ${config.nsfwOverridesSource} exists but could not be loaded; not starting without it`,
+    );
+  }
   timer = setInterval(() => void pollNsfwOverrides(), POLL_MS);
   timer.unref();
 }

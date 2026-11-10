@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
-const { loadNsfwOverrides, parseNsfwOverrides, pollNsfwOverrides } = await import('./nsfw.js');
+const { loadNsfwOverrides, parseNsfwOverrides, pollNsfwOverrides, startNsfwOverrides, stopNsfwOverrides } =
+  await import('./nsfw.js');
+const { config } = await import('./config.js');
 const {
   getCommunity,
   insertComments,
@@ -173,6 +175,56 @@ test('an operator override outranks the community-declared safeForWork', () => {
   setNsfwOverrides([]);
   assert.equal(getCommunity('declared.bso')?.nsfw, 1);
 });
+
+/** Run startNsfwOverrides against `source`, as if NSFW_OVERRIDES_SOURCE named it. */
+async function startWith(source: string): Promise<void> {
+  const configured = config.nsfwOverridesSource;
+  Object.defineProperty(config, 'nsfwOverridesSource', { value: source });
+  try {
+    await startNsfwOverrides();
+  } finally {
+    stopNsfwOverrides();
+    Object.defineProperty(config, 'nsfwOverridesSource', { value: configured });
+  }
+}
+
+test('startup refuses an overrides file that exists but cannot be loaded', async () => {
+  // Starting without it would let the next re-resolution drop every operator
+  // verdict, putting communities the operator marked NSFW back into search.
+  writeFileSync(file, 'not json{');
+  utimesSync(file, ++fakeTime, fakeTime);
+  await assert.rejects(startWith(file), /NSFW_OVERRIDES_SOURCE/);
+
+  // A file that loads, or no file at all (no overrides), starts as before.
+  writeOverrides([]);
+  await startWith(file);
+  await startWith(join(dir, 'absent.json'));
+});
+
+test(
+  'an overrides file that cannot be reached is not read as deleted',
+  { skip: process.getuid?.() === 0 && 'root ignores directory permissions' },
+  async () => {
+    upsertCommunity({ address: 'locked.bso' });
+    const lockedDir = join(dir, 'locked');
+    mkdirSync(lockedDir);
+    const lockedFile = join(lockedDir, 'nsfw.json');
+    writeFileSync(lockedFile, JSON.stringify(['locked.bso']));
+    assert.equal(await pollNsfwOverrides(lockedFile), true);
+    assert.equal(getCommunity('locked.bso')?.nsfw, 1);
+
+    // The file is still there, but stat() now fails with EACCES, not ENOENT.
+    chmodSync(lockedDir, 0o000);
+    try {
+      assert.equal(await pollNsfwOverrides(lockedFile), false, 'a poll keeps the last overrides');
+      assert.equal(getCommunity('locked.bso')?.nsfw, 1);
+      await assert.rejects(startWith(lockedFile), /NSFW_OVERRIDES_SOURCE/);
+      assert.equal(getCommunity('locked.bso')?.nsfw, 1, 'startup drops no operator verdict');
+    } finally {
+      chmodSync(lockedDir, 0o755);
+    }
+  },
+);
 
 test('pollNsfwOverrides applies the file, picks up changes, and clears on deletion', async () => {
   // 1. File appears forcing a community NSFW that nothing else marks.
