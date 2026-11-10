@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { ApiDown } from '@/components/Notice';
+import { notFound } from 'next/navigation';
 import { PostCard } from '@/components/PostCard';
 import { getCommunity, getPosts } from '@/lib/api';
 import { excerpt } from '@/lib/format';
@@ -37,7 +37,16 @@ export default async function CommunityPage({ params }: Params) {
     getPosts(`?community=${encodeURIComponent(address)}&sort=new&limit=50`, 300),
   ]);
 
-  if (!pageRes.ok) return <ApiDown />;
+  // The title and heading fall back to the URL text, so render only once the
+  // address is known to exist. The API's own 404 with no posts filed under the
+  // address is a 404, as in the sitemap route. Any API failure leaves that
+  // unknown: throw to app/error.tsx (5xx) instead of answering 200 under that
+  // title. Posts whose community row was never created stay browsable.
+  if (!pageRes.ok) throw new Error('The indexer API is unavailable.');
+  if (!metaRes.ok && pageRes.data.total === 0) {
+    if (metaRes.reason === 'not_found') notFound();
+    throw new Error('The indexer API is unavailable.');
+  }
   const meta = metaRes.ok ? metaRes.data : null;
   const posts = pageRes.data.posts;
 
