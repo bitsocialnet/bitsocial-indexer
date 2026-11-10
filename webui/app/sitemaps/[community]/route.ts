@@ -5,6 +5,7 @@ import {
   MAX_URLS_PER_COMMUNITY,
   SITEMAP_PAGE_LIMIT,
   SITEMAP_TTL,
+  unavailableResponse,
   urlsetXml,
   xmlResponse,
 } from '@/lib/sitemap';
@@ -13,14 +14,14 @@ type Params = { params: Promise<{ community: string }> };
 
 const isoDate = (unixSec: number) => new Date(unixSec * 1000).toISOString();
 
-/** Static pages + one landing page per community. */
+/** Static pages + one landing page per community; null when the API failed. */
 async function coreUrls() {
   const res = await getCommunities(SITEMAP_TTL);
-  const communities = res.ok ? res.data.communities : [];
+  if (!res.ok) return null;
   return [
     { loc: absUrl('/') },
     { loc: absUrl('/search') },
-    ...communities.map((c) => ({ loc: absUrl(`/p/${encodeURIComponent(c.address)}`) })),
+    ...res.data.communities.map((c) => ({ loc: absUrl(`/p/${encodeURIComponent(c.address)}`) })),
   ];
 }
 
@@ -30,6 +31,7 @@ async function coreUrls() {
  * for crawlers through internal links, just not sitemap-listed). Each API page
  * is cached for SITEMAP_TTL, so a full crawl costs at most
  * MAX_URLS_PER_COMMUNITY / SITEMAP_PAGE_LIMIT requests per community per hour.
+ * Null when any page fails: a failed page is not the end of the list.
  */
 async function communityUrls(address: string) {
   const urls: { loc: string; lastmod?: string }[] = [];
@@ -39,7 +41,8 @@ async function communityUrls(address: string) {
       `?community=${encodeURIComponent(address)}&sort=new&limit=${SITEMAP_PAGE_LIMIT}&page=${page}`,
       SITEMAP_TTL,
     );
-    if (!res.ok || res.data.posts.length === 0) break;
+    if (!res.ok) return null;
+    if (res.data.posts.length === 0) break;
     const { posts } = res.data;
     for (const p of posts) {
       urls.push({ loc: absUrl(`/c/${encodeURIComponent(p.cid)}`), lastmod: isoDate(p.timestamp) });
@@ -53,8 +56,16 @@ export async function GET(_req: Request, { params }: Params): Promise<Response> 
   const { community } = await params;
   const id = decodeURIComponent(community);
 
-  if (id === CORE_SITEMAP) return xmlResponse(urlsetXml(await coreUrls()));
+  if (id === CORE_SITEMAP) {
+    const urls = await coreUrls();
+    return urls ? xmlResponse(urlsetXml(urls)) : unavailableResponse();
+  }
 
-  if (!(await getCommunity(id)).ok) return new Response('unknown sitemap', { status: 404 });
-  return xmlResponse(urlsetXml(await communityUrls(id)));
+  // Only the API's own 404 means no such community; an outage is a 503.
+  const meta = await getCommunity(id);
+  if (!meta.ok) {
+    return meta.reason === 'not_found' ? new Response('unknown sitemap', { status: 404 }) : unavailableResponse();
+  }
+  const urls = await communityUrls(id);
+  return urls ? xmlResponse(urlsetXml(urls)) : unavailableResponse();
 }

@@ -34,6 +34,14 @@ export function xmlResponse(body: string, status = 200): Response {
   });
 }
 
+/**
+ * 503 for a sitemap the API could not supply in full. Never cached: a partial
+ * list served as complete would hide URLs from crawlers for the CDN TTL.
+ */
+export function unavailableResponse(): Response {
+  return new Response('indexer API unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+}
+
 export function urlsetXml(urls: { loc: string; lastmod?: string }[]): string {
   const entries = urls
     .map((u) => `  <url><loc>${xmlEscape(u.loc)}</loc>${u.lastmod ? `<lastmod>${u.lastmod}</lastmod>` : ''}</url>`)
