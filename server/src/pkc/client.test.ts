@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatPkcRpcUrlForLog, resetPkcClient, setPkcClientForTest, type PkcClient } from './client.js';
+import { formatPkcRpcUrlForLog, getPkcClient, resetPkcClient, setPkcClientForTest, type PkcClient } from './client.js';
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -69,5 +69,24 @@ test('a second reset retires a replacement installed while the first reset is pe
   firstDestroy.resolve();
   secondDestroy.resolve();
   await Promise.all([resetA, resetB]);
+  setPkcClientForTest(null);
+});
+
+test('a reset scoped to a client already retired leaves its replacement cached and running', async () => {
+  let firstDestroyed = 0;
+  let secondDestroyed = 0;
+  const first = Promise.resolve(client(async () => void firstDestroyed++));
+  const second = Promise.resolve(client(async () => void secondDestroyed++));
+
+  // Two crawls on `first` time out. The first timeout retires it, and the next
+  // crawl installs a replacement before the second timeout fires.
+  setPkcClientForTest(first);
+  await resetPkcClient({ client: first });
+  setPkcClientForTest(second);
+  await resetPkcClient({ client: first });
+
+  assert.equal(firstDestroyed, 1);
+  assert.equal(secondDestroyed, 0, 'the replacement is not torn down under the crawls using it');
+  assert.equal(getPkcClient(), second, 'and it stays cached');
   setPkcClientForTest(null);
 });

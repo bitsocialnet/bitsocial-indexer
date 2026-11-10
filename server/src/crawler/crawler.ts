@@ -13,7 +13,7 @@ import {
   upsertCommunity,
   type CommentInput,
 } from '../db/index.js';
-import { getPkcClient, resetPkcClient } from '../pkc/client.js';
+import { getPkcClient, resetPkcClient, type PkcClient } from '../pkc/client.js';
 import { dequeue, due, enqueue, markFailed, markRunning, markSuccess, queued, reclaimAbandoned } from './queue.js';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -360,9 +360,9 @@ async function collectThread(comment: any, address: string, out: CommentInput[],
  * also becomes `last_indexed_at`. Only an exhausted all-time post chain advances
  * `last_complete_posts_crawl_at`: bounded/filtered crawls cannot prove absence.
  */
-async function indexCommunity(address: string): Promise<number> {
+async function indexCommunity(address: string, client: Promise<PkcClient>): Promise<number> {
   const deadline = Date.now() + config.crawlTimeoutMs;
-  const pkc = await getPkcClient();
+  const pkc = await client;
   const community: any = await pkc.getCommunity(address);
   const crawledAt = nowSec();
 
@@ -449,15 +449,18 @@ export async function tick(): Promise<void> {
       // A reload may have dropped it after due() built this batch.
       if (!markRunning(address)) return;
       crawled++;
+      // Held so a timeout retires the client this crawl ran on, never a
+      // replacement that a peer's earlier timeout led another crawl to open.
+      const client = getPkcClient();
       try {
-        const n = await withTimeout(indexCommunity(address), config.crawlTimeoutMs, `${address} crawl`);
+        const n = await withTimeout(indexCommunity(address, client), config.crawlTimeoutMs, `${address} crawl`);
         markSuccess(address, nextRunAt);
         if (n) console.log(`[crawler] ${address}: indexed ${n} new comments`);
       } catch (err) {
         if (err instanceof CrawlTimeoutError) {
           // A hung RPC promise cannot be cancelled directly. Retiring its
           // transport rejects the orphan and gives subsequent work a new one.
-          void resetPkcClient();
+          void resetPkcClient({ client });
         }
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[crawler] ${address}: ${message}`);

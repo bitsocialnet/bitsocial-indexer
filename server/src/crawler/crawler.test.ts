@@ -550,3 +550,61 @@ test('a community crawled in one pass is due again at the next tick, one interva
     for (const address of queued()) dequeue(address);
   }
 });
+
+test('a crawl timing out after a peer’s timeout reset leaves the replacement client alone', async () => {
+  for (const address of queued()) dequeue(address);
+  const timeout = config.crawlTimeoutMs;
+  const concurrency = config.crawlConcurrency;
+  Object.defineProperty(config, 'crawlTimeoutMs', { value: 50 });
+  Object.defineProperty(config, 'crawlConcurrency', { value: 2 });
+
+  // The replacement's call is in flight when the second hung crawl times out;
+  // destroying the replacement aborts it, as pkc-js does.
+  let answer!: (value: unknown) => void;
+  let abort!: (err: Error) => void;
+  const replacementCall = new Promise<unknown>((resolve, reject) => {
+    answer = resolve;
+    abort = reject;
+  });
+  const replacement = {
+    getCommunity: () => {
+      // Answer only once hung-b.bso, the second crawl to time out, has settled.
+      const poll = () => {
+        if (queueRow('hung-b.bso')?.status === 'running') setTimeout(poll, 1);
+        else answer({ posts: { pages: { new: { comments: [] } } } });
+      };
+      poll();
+      return replacementCall;
+    },
+    getComment: async () => ({}),
+    destroy: async () => abort(new Error('client destroyed')),
+  };
+  // Both hung crawls share this client. Tearing it down makes way for the
+  // replacement, the way the next getPkcClient() would connect one.
+  let replaced = false;
+  setPkcClientForTest(
+    Promise.resolve({
+      getCommunity: () => new Promise<never>(() => {}),
+      getComment: async () => ({}),
+      destroy: async () => {
+        if (replaced) return;
+        replaced = true;
+        setPkcClientForTest(Promise.resolve(replacement));
+      },
+    }),
+  );
+  try {
+    for (const address of ['hung-a.bso', 'hung-b.bso', 'healthy.bso']) enqueue(address);
+    // healthy.bso waits for the first free worker.
+    getDb().prepare('UPDATE crawl_queue SET next_run_at = next_run_at - 1 WHERE community_address LIKE ?').run('hung-%');
+    await tick();
+    assert.equal(queueRow('hung-a.bso')?.status, 'failed');
+    assert.equal(queueRow('hung-b.bso')?.status, 'failed');
+    assert.deepEqual(queueRow('healthy.bso'), { status: 'success', last_error: null });
+  } finally {
+    Object.defineProperty(config, 'crawlTimeoutMs', { value: timeout });
+    Object.defineProperty(config, 'crawlConcurrency', { value: concurrency });
+    setPkcClientForTest(null);
+    for (const address of queued()) dequeue(address);
+  }
+});
