@@ -12,7 +12,8 @@ type Params = { params: Promise<{ community: string }> };
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { community } = await params;
   const address = decodeURIComponent(community);
-  const meta = await getCommunity(address);
+  const res = await getCommunity(address);
+  const meta = res.ok ? res.data : null;
 
   const title = meta?.title ?? address;
   const description = excerpt(meta?.description) || `Indexed posts from ${address}.`;
@@ -31,13 +32,14 @@ export default async function CommunityPage({ params }: Params) {
   const { community } = await params;
   const address = decodeURIComponent(community);
 
-  const [meta, page] = await Promise.all([
+  const [metaRes, pageRes] = await Promise.all([
     getCommunity(address),
     getPosts(`?community=${encodeURIComponent(address)}&sort=new&limit=50`, 300),
   ]);
 
-  if (page === null) return <ApiDown />;
-  const posts = page.posts;
+  if (!pageRes.ok) return <ApiDown />;
+  const meta = metaRes.ok ? metaRes.data : null;
+  const posts = pageRes.data.posts;
 
   return (
     <div>

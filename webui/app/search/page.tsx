@@ -20,8 +20,9 @@ export async function generateMetadata({ searchParams }: SearchParams): Promise<
 export default async function SearchPage({ searchParams }: SearchParams) {
   const { q } = await searchParams;
   const query = (q ?? '').trim();
-  const result = query ? await search(query) : null;
-  const apiDown = query !== '' && result === null;
+  const res = query ? await search(query) : null;
+  const result = res?.ok ? res.data : null;
+  const apiDown = res !== null && !res.ok;
 
   return (
     <div>

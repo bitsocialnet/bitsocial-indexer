@@ -15,7 +15,8 @@ const isoDate = (unixSec: number) => new Date(unixSec * 1000).toISOString();
 
 /** Static pages + one landing page per community. */
 async function coreUrls() {
-  const communities = (await getCommunities(SITEMAP_TTL))?.communities ?? [];
+  const res = await getCommunities(SITEMAP_TTL);
+  const communities = res.ok ? res.data.communities : [];
   return [
     { loc: absUrl('/') },
     { loc: absUrl('/search') },
@@ -38,11 +39,12 @@ async function communityUrls(address: string) {
       `?community=${encodeURIComponent(address)}&sort=new&limit=${SITEMAP_PAGE_LIMIT}&page=${page}`,
       SITEMAP_TTL,
     );
-    if (!res || res.posts.length === 0) break;
-    for (const p of res.posts) {
+    if (!res.ok || res.data.posts.length === 0) break;
+    const { posts } = res.data;
+    for (const p of posts) {
       urls.push({ loc: absUrl(`/c/${encodeURIComponent(p.cid)}`), lastmod: isoDate(p.timestamp) });
     }
-    if (res.posts.length < SITEMAP_PAGE_LIMIT || urls.length >= MAX_URLS_PER_COMMUNITY) break;
+    if (posts.length < SITEMAP_PAGE_LIMIT || urls.length >= MAX_URLS_PER_COMMUNITY) break;
   }
   return urls.slice(0, MAX_URLS_PER_COMMUNITY);
 }
@@ -53,6 +55,6 @@ export async function GET(_req: Request, { params }: Params): Promise<Response> 
 
   if (id === CORE_SITEMAP) return xmlResponse(urlsetXml(await coreUrls()));
 
-  if (!(await getCommunity(id))) return new Response('unknown sitemap', { status: 404 });
+  if (!(await getCommunity(id)).ok) return new Response('unknown sitemap', { status: 404 });
   return xmlResponse(urlsetXml(await communityUrls(id)));
 }

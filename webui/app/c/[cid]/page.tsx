@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
 import { Prose } from '@/components/Prose';
 import { isTombstone, Tombstone } from '@/components/Tombstone';
 import { getThread } from '@/lib/api';
@@ -23,10 +24,12 @@ function threadTitle(post: Comment): string {
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { cid } = await params;
-  const thread = await getThread(decodeURIComponent(cid));
-  if (!thread) return { title: 'Post not found', robots: { index: false } };
+  const res = await getThread(decodeURIComponent(cid));
+  // The page answers a failed lookup (notFound, or a throw to app/error.tsx);
+  // it shares this request.
+  if (!res.ok) return {};
 
-  const { post } = thread;
+  const { post } = res.data;
   const title = threadTitle(post);
   const description =
     excerpt(post.content) || `A thread from ${post.community_address} with ${post.reply_count} replies.`;
@@ -51,13 +54,16 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 
 export default async function ThreadPage({ params }: Params) {
   const { cid } = await params;
-  const thread = await getThread(decodeURIComponent(cid));
-
-  if (thread === null) {
-    return <div className="notice">Post not found, or the indexer API isn’t reachable.</div>;
+  const res = await getThread(decodeURIComponent(cid));
+  if (!res.ok) {
+    // Only the API's own 404 is a missing post. Any other failure goes to the
+    // error boundary as a 5xx: a 200 "not found" page (noindexed) during an
+    // outage would tell search engines to drop a real archived thread.
+    if (res.reason === 'not_found') notFound();
+    throw new Error('The indexer API is unavailable.');
   }
 
-  const { post, replies } = thread;
+  const { post, replies } = res.data;
 
   return (
     <article>

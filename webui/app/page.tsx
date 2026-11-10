@@ -17,18 +17,22 @@ export const metadata: Metadata = {
 export default async function Home() {
   const [health, communitiesRes] = await Promise.all([getHealth(), getCommunities()]);
 
-  if (!health) return <ApiDown />;
+  // A failed communities fetch is an outage, not an instance with nothing configured.
+  if (!health.ok || !communitiesRes.ok) return <ApiDown />;
 
-  const communities = communitiesRes?.communities ?? [];
+  const communities = communitiesRes.data.communities;
   if (communities.length === 0) return <EmptyState />;
 
-  const posts = (await getPosts('?sort=new&limit=25'))?.posts ?? [];
+  const postsRes = await getPosts('?sort=new&limit=25');
+  const posts = postsRes.ok ? postsRes.data.posts : [];
 
   return (
     <div className="layout">
       <section>
         <h2 className="section-title">Recent across {communities.length} communities</h2>
-        {posts.length === 0 ? (
+        {!postsRes.ok ? (
+          <ApiDown />
+        ) : posts.length === 0 ? (
           <div className="notice">Communities are configured, but nothing has been indexed yet.</div>
         ) : (
           posts.map((p) => <PostCard key={p.cid} post={p} />)

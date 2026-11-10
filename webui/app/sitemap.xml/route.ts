@@ -7,7 +7,8 @@ import { absUrl, CORE_SITEMAP, SITEMAP_TTL, sitemapIndexXml, xmlResponse } from 
 export const dynamic = 'force-dynamic';
 
 export async function GET(): Promise<Response> {
-  const communities = (await getCommunities(SITEMAP_TTL))?.communities ?? [];
+  const res = await getCommunities(SITEMAP_TTL);
+  const communities = res.ok ? res.data.communities : [];
   const children = [CORE_SITEMAP, ...communities.map((c) => c.address)];
   return xmlResponse(sitemapIndexXml(children.map((id) => absUrl(`/sitemaps/${encodeURIComponent(id)}`))));
 }

@@ -4,20 +4,30 @@ import type { Community, Health, PostPage, SearchResult, Thread } from './types'
 const BASE = process.env.INDEXER_API ?? 'http://localhost:4000';
 
 /**
- * Fetch JSON from the indexer API; returns null on any failure (API down, 404…).
+ * Outcome of an API read. `not_found` is the API's own 404 (that post or
+ * community does not exist); `unavailable` is any other failure (API down,
+ * 5xx, bad JSON) and says nothing about whether it exists. Callers must keep
+ * them apart: a "not found" page or noindex served during an outage tells
+ * search engines to drop real archived URLs.
+ */
+export type ApiResult<T> = { ok: true; data: T } | { ok: false; reason: 'not_found' | 'unavailable' };
+
+/**
+ * Fetch JSON from the indexer API.
  * `revalidate` (seconds) opts the request into Next's data cache so SSR pages
  * don't hit the API on every request; omit it for uncached (no-store) fetches.
  */
-async function get<T>(path: string, revalidate?: number): Promise<T | null> {
+async function get<T>(path: string, revalidate?: number): Promise<ApiResult<T>> {
   try {
     const res = await fetch(
       `${BASE}${path}`,
       revalidate === undefined ? { cache: 'no-store' } : { next: { revalidate } },
     );
-    if (!res.ok) return null;
-    return (await res.json()) as T;
+    if (res.status === 404) return { ok: false, reason: 'not_found' };
+    if (!res.ok) return { ok: false, reason: 'unavailable' };
+    return { ok: true, data: (await res.json()) as T };
   } catch {
-    return null;
+    return { ok: false, reason: 'unavailable' };
   }
 }
 
