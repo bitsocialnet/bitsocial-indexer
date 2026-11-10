@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createJevClient, JevError } from './client.mjs';
 import { redactJevSecrets } from './config.mjs';
 import { validatePlan, runBrowserPlan } from './browser-plan.mjs';
-import { createPlaywrightDriver } from './browser-playwright.mjs';
+import { closeOnTermination, createPlaywrightDriver } from './browser-playwright.mjs';
 
 export async function main(args = process.argv.slice(2)) {
   if (!args.length || args.includes('--help')) {
@@ -57,7 +57,14 @@ export async function main(args = process.argv.slice(2)) {
           maxInputBytes: Math.min(128_000, plan.limits.maxSnapshotBytes + 30_000),
         });
     client?.assertReady();
-    const result = await runBrowserPlan(rawPlan, { driver: createPlaywrightDriver(), client, baseline: !!options['--baseline'] });
+    const driver = createPlaywrightDriver();
+    const release = closeOnTermination(driver);
+    let result;
+    try {
+      result = await runBrowserPlan(rawPlan, { driver, client, baseline: !!options['--baseline'] });
+    } finally {
+      await release();
+    }
     process.stdout.write(JSON.stringify({ ...result, plan: planReference() }) + '\n');
     return result.status === 'completed' ? 0 : 2;
   } catch (error) {

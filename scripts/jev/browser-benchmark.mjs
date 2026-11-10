@@ -4,14 +4,17 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs, promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { parseArgs } from "node:util";
 import { performance } from "node:perf_hooks";
-import { createPlaywrightDriver, findPlaywrightCli } from "./browser-playwright.mjs";
+import {
+  closeOnTermination,
+  createPlaywrightDriver,
+  execCommand,
+  findPlaywrightCli,
+} from "./browser-playwright.mjs";
 import { runBrowserPlan, validatePlan } from "./browser-plan.mjs";
-import { createJevClient } from "./client.mjs";
+import { createJevClient, JevError } from "./client.mjs";
 
-const execute = promisify(execFile);
 export async function readBenchmarkPlan(file) {
   const handle = await fs.open(
     file,
@@ -102,30 +105,55 @@ export async function benchmarkRun(plan, { createDriver, runPlan, client, baseli
       estimatedCostUsd: difference.usageMissing ? null : difference.knownCostSubtotalUsd,
     };
   };
+  // A retained helper tree's driver closes without waiting for a wrapper open that is still
+  // starting the browser, and both the termination handler and runPlan's cleanup call close.
+  // Every variant therefore gets one shared close here, ordered after any in-flight wrapper
+  // open, and no browser work starts once close has begun. The wrapper close also runs in its
+  // own process group, so a repeated Ctrl-C cannot kill it before it releases the slot.
+  let closing, wrapperOpen;
   const raw = createDriver({
-    execute: async (...args) => {
+    execute: async (file, args, options, ...rest) => {
+      const wrapperCommand = path.basename(file) === "pw-session.sh" ? args[0] : undefined;
+      if (closing && wrapperCommand !== "close") throw new JevError("browser_closed");
       const started = performance.now();
       controlCalls++;
+      const call = execCommand(
+        file,
+        args,
+        wrapperCommand === "close" ? { ...options, detached: true } : options,
+        ...rest,
+      );
+      if (wrapperCommand === "open") wrapperOpen = call.catch(() => {});
       try {
-        return await execute(...args);
+        return await call;
       } finally {
         controlMs += performance.now() - started;
       }
     },
   });
+  const timed = async (target, key, args) => {
+    const phase = key === "observe" && args[0] ? "observeWithAssertions" : key;
+    const started = performance.now();
+    try {
+      return await target[key](...args);
+    } finally {
+      components[phase] ||= { calls: 0, elapsedMs: 0 };
+      components[phase].calls++;
+      components[phase].elapsedMs += performance.now() - started;
+    }
+  };
   const driver = new Proxy(raw, {
     get(target, key) {
       if (typeof target[key] !== "function") return target[key];
+      if (key === "close")
+        return () =>
+          (closing ||= (async () => {
+            await wrapperOpen;
+            return timed(target, key, []);
+          })());
       return async (...args) => {
-        const phase = key === "observe" && args[0] ? "observeWithAssertions" : key;
-        const started = performance.now();
-        try {
-          return await target[key](...args);
-        } finally {
-          components[phase] ||= { calls: 0, elapsedMs: 0 };
-          components[phase].calls++;
-          components[phase].elapsedMs += performance.now() - started;
-        }
+        if (closing) throw new JevError("browser_closed");
+        return timed(target, key, args);
       };
     },
   });
@@ -141,7 +169,13 @@ export async function benchmarkRun(plan, { createDriver, runPlan, client, baseli
     },
   };
   const started = performance.now();
-  const report = await runPlan(plan, { driver, client: measuredClient, baseline });
+  const release = closeOnTermination(driver);
+  let report;
+  try {
+    report = await runPlan(plan, { driver, client: measuredClient, baseline });
+  } finally {
+    await release();
+  }
   return {
     status: report.status,
     reason: report.reason,
