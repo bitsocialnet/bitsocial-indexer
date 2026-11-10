@@ -1,10 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
+import { notFound, permanentRedirect } from 'next/navigation';
 import { Prose } from '@/components/Prose';
 import { isTombstone, Tombstone } from '@/components/Tombstone';
 import { getThread } from '@/lib/api';
-import { excerpt, timeAgo } from '@/lib/format';
+import { commentPath, excerpt, timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
 
 type Params = { params: Promise<{ cid: string }> };
@@ -61,6 +61,11 @@ export default async function ThreadPage({ params }: Params) {
   }
 
   const { post, replies } = res.data;
+  // A reply's CID (search returns replies) opens the reply in its thread. The
+  // API answers it with the reply as the post and the root left out, so
+  // rendering it here would show a thread without its OP under a new URL.
+  // The post_cid check keeps a malformed row from redirecting to itself.
+  if (post.depth > 0 && post.post_cid !== post.cid) permanentRedirect(commentPath(post));
 
   return (
     <article>
@@ -98,7 +103,7 @@ export default async function ThreadPage({ params }: Params) {
         {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
       </h2>
       {replies.map((r) => (
-        <div className={`reply${isTombstone(r) ? ' reply-tombstone' : ''}`} key={r.cid}>
+        <div className={`reply${isTombstone(r) ? ' reply-tombstone' : ''}`} key={r.cid} id={r.cid}>
           <div className="meta">
             <span>{r.author_name ?? 'anon'}</span>
             <span>·</span>

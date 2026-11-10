@@ -1,15 +1,21 @@
 import Link from 'next/link';
-import { timeAgo } from '@/lib/format';
+import { isTombstone } from '@/components/Tombstone';
+import { commentPath, timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
 
 export function PostCard({ post }: { post: Comment }) {
   const score = post.upvote_count - post.downvote_count;
-  const heading = post.title || post.content?.slice(0, 90) || 'untitled';
+  // Search results can be replies or (looked up by CID) redacted tombstones.
+  const heading = isTombstone(post)
+    ? post.takedown || post.removed
+      ? '[removed]'
+      : '[deleted]'
+    : post.title || post.content?.slice(0, 90) || 'untitled';
   return (
     <article className="card post">
       <div className="post-score" title="score">▲ {score}</div>
       <div className="post-body">
-        <Link href={`/c/${encodeURIComponent(post.cid)}`} className="post-title">
+        <Link href={commentPath(post)} className="post-title">
           {heading}
         </Link>
         <div className="meta">
