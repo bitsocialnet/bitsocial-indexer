@@ -40,6 +40,16 @@ const median = (values) => {
       : (sorted[middle - 1] + sorted[middle]) / 2
     : null;
 };
+// A flow that passed its exact assertions is measurable even when advisory semantic checks were
+// not run (deterministic mode) or need review; a failed cleanup never is. Runs without
+// flowCompleted fall back to their overall status.
+const flowCompleted = (run) =>
+  !!run &&
+  (run.flowCompleted ?? run.status === "completed") === true &&
+  !run.cleanupFailed &&
+  run.reason !== "cleanup_failed";
+
+export const benchmarkExitStatus = (runs) => (runs.every(flowCompleted) ? 0 : 2);
 
 export function summarizePairs(runs) {
   const pairs = new Map();
@@ -55,10 +65,11 @@ export function summarizePairs(runs) {
     );
     const comparable = selected.filter(
       ({ old, combined }) =>
-        old?.status === "completed" &&
-        combined?.status === "completed" &&
+        flowCompleted(old) &&
+        flowCompleted(combined) &&
         JSON.stringify(old.actions) === JSON.stringify(combined.actions) &&
-        JSON.stringify(old.assertions) === JSON.stringify(combined.assertions),
+        JSON.stringify(old.assertions) === JSON.stringify(combined.assertions) &&
+        JSON.stringify(old.semantic) === JSON.stringify(combined.semantic),
     );
     if (!selected.length) continue;
     summaries.push({
@@ -181,6 +192,7 @@ export async function benchmarkRun(plan, { createDriver, runPlan, client, baseli
     reason: report.reason,
     flowCompleted: report.flowCompleted,
     cleanupFailed: report.cleanupFailed,
+    semantic: report.semantic,
     actions: report.actions,
     assertions: report.assertions,
     staleReplans: report.staleReplans,
@@ -340,7 +352,7 @@ export async function main(argv = process.argv.slice(2)) {
         evidence: values.evidence,
         samples,
         warmups,
-        note: "Lifecycle includes browser setup, navigation, exact assertions, and owned-session cleanup. Control calls count helper subprocess invocations (wrapper open/close each count once), not CDP messages. Components overlap control time and must not be added to it. Warmups retained but excluded; only completed pairs with identical actions and assertions enter timing summaries. Small local measurements, not general browser speed claims.",
+        note: "Lifecycle includes browser setup, navigation, exact assertions, and owned-session cleanup. Control calls count helper subprocess invocations (wrapper open/close each count once), not CDP messages. Components overlap control time and must not be added to it. Warmups retained but excluded; only pairs whose flows completed with identical actions, assertions and advisory semantic results enter timing summaries. Small local measurements, not general browser speed claims.",
         runs,
         summary: summarizePairs(runs),
         usage: client?.stats() || null,
@@ -349,7 +361,7 @@ export async function main(argv = process.argv.slice(2)) {
       2,
     ),
   );
-  return runs.every((run) => run.status === "completed") ? 0 : 2;
+  return benchmarkExitStatus(runs);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href)

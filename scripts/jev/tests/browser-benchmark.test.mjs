@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { summarizePairs, main, readBenchmarkPlan } from "../browser-benchmark.mjs";
+import {
+  benchmarkExitStatus,
+  summarizePairs,
+  main,
+  readBenchmarkPlan,
+} from "../browser-benchmark.mjs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -44,6 +49,54 @@ test("paired timing excludes warmups, failures and different action histories, a
   assert.equal(result[0].medianPairedReductionFraction, 0.5);
   assert.equal(result[1].medianPairedReductionFraction, -0.5);
   assert.deepEqual(result[1].combinedAdapterModes, ["snapshot-command"]);
+});
+
+test("the benchmark exits 0 when every flow completed, even with advisory semantic checks not run", () => {
+  const run = (extra = {}) => ({
+    status: "incomplete",
+    reason: "semantic_not_run",
+    flowCompleted: true,
+    ...extra,
+  });
+  assert.equal(benchmarkExitStatus([run(), run()]), 0);
+  // A retained helper tree without flowCompleted falls back to its overall status.
+  assert.equal(benchmarkExitStatus([run(), { status: "completed" }]), 0);
+  assert.equal(benchmarkExitStatus([run(), { status: "incomplete", reason: "step_limit" }]), 2);
+  assert.equal(benchmarkExitStatus([run({ flowCompleted: false, reason: "step_limit" })]), 2);
+  assert.equal(benchmarkExitStatus([run({ cleanupFailed: true })]), 2);
+  assert.equal(benchmarkExitStatus([{ status: "incomplete", reason: "cleanup_failed" }]), 2);
+});
+
+test("completed flows pair even when advisory semantic checks did not pass; failed cleanup never pairs", () => {
+  const make = (transport, extra = {}) => ({
+    case: "a",
+    sample: 0,
+    transport,
+    mode: "deterministic",
+    status: "incomplete",
+    reason: "semantic_not_run",
+    flowCompleted: true,
+    actions: ["click"],
+    assertions: [true],
+    semantic: [{ id: "clarity", advisory: true, verdict: "not_run" }],
+    lifecycleMs: transport === "old" ? 200 : 100,
+    controlCalls: 1,
+    adapterMode: transport === "old" ? "legacy-separate" : "combined-aria",
+    ...extra,
+  });
+  const comparable = (combined) => summarizePairs([make("old"), make("combined", combined)])[0];
+  assert.equal(comparable().comparablePairs, 1);
+  assert.equal(comparable().medianPairedReductionFraction, 0.5);
+  assert.equal(comparable({ cleanupFailed: true }).comparablePairs, 0);
+  // A retained helper tree reports a failed cleanup only through its reason.
+  assert.equal(comparable({ reason: "cleanup_failed" }).comparablePairs, 0);
+  assert.equal(comparable({ flowCompleted: false, reason: "step_limit" }).comparablePairs, 0);
+  // Different advisory work means the timings are not comparable.
+  assert.equal(
+    comparable({ semantic: [{ id: "clarity", advisory: true, verdict: "unavailable" }] })
+      .comparablePairs,
+    0,
+  );
 });
 
 test("SIGTERM during a live benchmark closes the owned browser and releases the shared slot", async () => {
