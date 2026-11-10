@@ -33,9 +33,21 @@ const output = path.resolve(packageRoot, options.output || `.react-perf/${comman
 await mkdir(output, { recursive: true, mode: 0o700 });
 const report = { schemaVersion: 1, command, cpu, samples, viewport: { width: 1280, height: 900 }, output, startedAt: new Date().toISOString(), cases: [], ok: false };
 const abort = new AbortController();
-const interrupt = () => abort.abort(new Error('Profiling interrupted'));
-process.once('SIGINT', interrupt);
-process.once('SIGTERM', interrupt);
+// Stay subscribed for repeats: with no listener left, a second signal takes
+// Node's default exit and skips every finally block, stranding the owned app
+// server and the machine-wide browser slot. Cleanup steps are each bounded.
+const interrupt = () => {
+  if (abort.signal.aborted) process.stderr.write('[perf] Still cleaning up the browser and app server before exiting\n');
+  abort.abort(new Error('Profiling interrupted'));
+};
+process.on('SIGINT', interrupt);
+process.on('SIGTERM', interrupt);
+// Settles only by rejecting on abort, so steps that never poll the signal
+// (navigation, scenario waits, the selftest) stop blocking cleanup at once.
+const aborted = new Promise((_, reject) => {
+  abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true });
+});
+void aborted.catch(() => {});
 const safeName = (name) => name.replace(/[^a-z0-9._-]/gi, '-');
 
 async function runCase(browser, target, scenario, origin, sample) {
@@ -137,6 +149,7 @@ async function runCase(browser, target, scenario, origin, sample) {
   try {
     await Promise.race([
       crashed,
+      aborted,
       (async () => {
         await scenario.prepare?.({ page, origin });
         await page.goto(new URL(scenario.path || '/', origin).href, { waitUntil: 'domcontentloaded', timeout: 180000 });
@@ -189,7 +202,7 @@ try {
     report.browser = await browser.version();
     if (command === 'selftest' || command === 'check') {
       process.stderr.write('[perf] Validating collector against React compatibility fixtures\n');
-      report.selftest = await runSelftest(browser, packageRoot);
+      report.selftest = await Promise.race([runSelftest(browser, packageRoot), aborted]);
       if (command === 'selftest') return;
     }
     const config = (await import('./config.mjs')).default;
