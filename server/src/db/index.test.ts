@@ -227,6 +227,27 @@ test('re-crawls refresh counters and last_seen_at but never blank archived conte
   assert.equal(post?.last_seen_at, now);
 });
 
+test('a re-crawl that edits a comment re-indexes its new text for search', () => {
+  const cid = 'op-edited';
+  insertComments([makeComment({ cid, title: 'kinkajou notes', content: 'original quetzal', author_name: 'Saola' })]);
+  assert.equal(searchPosts({ q: 'quetzal' }).total, 1);
+
+  // An author edit reaches the crawler as new text on the same CID.
+  insertComments([makeComment({ cid, title: 'fossa notes', content: 'edited binturong', author_name: 'Dhole' })]);
+  assert.equal(getThread(cid)?.post.content, 'edited binturong');
+  assert.equal(searchPosts({ q: 'binturong' }).total, 1, 'the edited body is searchable');
+  assert.equal(searchPosts({ selftext: 'binturong' }).total, 1);
+  assert.equal(searchPosts({ q: 'fossa' }).total, 1, 'the edited title is searchable');
+  assert.equal(searchPosts({ q: 'dhole' }).total, 1, 'the new display name is searchable');
+  for (const old of ['quetzal', 'kinkajou', 'saola']) {
+    assert.equal(searchPosts({ q: old }).total, 0, `the replaced text "${old}" no longer matches`);
+  }
+
+  // A re-crawl that omits the text keeps the stored text, and its index entry.
+  insertComments([makeComment({ cid, title: null, content: null, author_name: null })]);
+  assert.equal(searchPosts({ q: 'binturong' }).total, 1);
+});
+
 test('re-crawls move legacy-address rows under the configured canonical community', () => {
   const cid = 'op-legacy-community';
   const archivedCid = 'op-legacy-community-archived';

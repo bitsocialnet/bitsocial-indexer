@@ -851,6 +851,8 @@ export interface CommentInput {
  *   flags an already-indexed comment as pending, the row is kept but stops
  *   being served (and leaves the FTS index).
  * - removed/deleted comments stay as rows (tombstones) but leave the FTS index.
+ * - a servable comment whose title, content or author name changed (an author
+ *   edit) is re-indexed, so search matches what is stored.
  * - blocklisted CIDs (operator takedown) are marked on insert and never enter
  *   the FTS index — re-crawling cannot resurrect a takedown.
  * - `nsfw` only ever ratchets up, so a page that omits the flag cannot quietly
@@ -861,7 +863,8 @@ export interface CommentInput {
 export function insertComments(rows: CommentInput[]): number {
   const database = getDb();
   const selectPrior = database.prepare(
-    'SELECT community_address, pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+    `SELECT community_address, pending_approval, removed, deleted, takedown, title, content, author_name
+       FROM comments WHERE cid = ?`,
   );
   const moveCommunityArchive = database.prepare(
     'UPDATE comments SET community_address = @next WHERE community_address = @prior',
@@ -949,7 +952,10 @@ export function insertComments(rows: CommentInput[]): number {
       };
 
       const prior = selectPrior.get(r.cid) as
-        | { community_address: string; pending_approval: number; removed: number; deleted: number; takedown: number }
+        | Pick<
+            Comment,
+            'community_address' | 'pending_approval' | 'removed' | 'deleted' | 'takedown' | 'title' | 'content' | 'author_name'
+          >
         | undefined;
       if (prior && prior.community_address !== r.community_address) {
         // Seeing any still-live row through a canonical alias proves that the
@@ -980,11 +986,18 @@ export function insertComments(rows: CommentInput[]): number {
       update.run(row);
       const wasServable = !prior.pending_approval && !prior.removed && !prior.deleted && !prior.takedown;
       const isServable = !pending && !removed && !deleted && !blocked && !prior.takedown;
+      // An author edit arrives as new text on the same CID. The UPDATE above
+      // stored it, so a row that stays servable has to be re-indexed too, or
+      // search keeps matching the old words and never the new ones.
+      const edited =
+        (row.title !== null && row.title !== prior.title)
+        || (row.content !== null && row.content !== prior.content)
+        || (row.author_name !== null && row.author_name !== prior.author_name);
       if (wasServable && !isServable) {
         deleteFts.run(r.cid);
-      } else if (!wasServable && isServable) {
+      } else if (isServable && (!wasServable || edited)) {
         const stored = selectStored.get(r.cid) as Pick<Comment, 'title' | 'content' | 'author_name'>;
-        deleteFts.run(r.cid); // defensive: never double-index
+        deleteFts.run(r.cid); // drops the edited-away text; never double-indexes
         insertFts.run({ cid: r.cid, title: stored.title, content: stored.content, author_name: stored.author_name });
       }
     }
