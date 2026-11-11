@@ -1,10 +1,18 @@
 import Link from 'next/link';
+import { isTombstone } from '@/components/Tombstone';
 import { timeAgo } from '@/lib/format';
 import type { Comment } from '@/lib/types';
 
 export function PostCard({ post }: { post: Comment }) {
   const score = post.upvote_count - post.downvote_count;
-  const heading = post.title || post.content?.slice(0, 90) || 'untitled';
+  // Search results can be replies or (looked up by CID) redacted tombstones.
+  // A reply links to its own CID: the thread page sends it to its place in the
+  // thread while the API serves the root, and renders it when the root is hidden.
+  const heading = isTombstone(post)
+    ? post.takedown || post.removed
+      ? '[removed]'
+      : '[deleted]'
+    : post.title || post.content?.slice(0, 90) || 'untitled';
   return (
     <article className="card post">
       <div className="post-score" title="score">▲ {score}</div>

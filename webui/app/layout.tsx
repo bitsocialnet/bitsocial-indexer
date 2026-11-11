@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Exo, Manrope } from 'next/font/google';
+import { connection } from 'next/server';
 import type { ReactNode } from 'react';
 import './globals.css';
 import { BrandHeader } from '@/components/BrandHeader';
@@ -21,7 +22,11 @@ export const metadata: Metadata = {
   twitter: { card: 'summary' },
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  // Branding and theme come from the runtime env (lib/site.ts). Without this
+  // the built-in 404 page is the one route prerendered at build time, and an
+  // instance rebranded or themed through env still shows the build's defaults.
+  await connection();
   return (
     <html lang="en" data-theme={theme} className={`${exo.variable} ${manrope.variable}`}>
       <body>

@@ -1,3 +1,15 @@
+import type { Comment } from './types';
+
+/**
+ * Link to a comment: a post's own thread page, or a reply's place in its
+ * thread (the thread page gives each reply its CID as the element id).
+ */
+export function commentPath(c: Pick<Comment, 'cid' | 'post_cid' | 'depth'>): string {
+  return c.depth > 0
+    ? `/c/${encodeURIComponent(c.post_cid)}#${encodeURIComponent(c.cid)}`
+    : `/c/${encodeURIComponent(c.cid)}`;
+}
+
 /** Compact relative time from a unix-seconds timestamp. */
 export function timeAgo(sec: number): string {
   const delta = Math.max(0, Math.floor(Date.now() / 1000) - sec);
