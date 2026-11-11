@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { notFound, permanentRedirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { Prose } from '@/components/Prose';
 import { isTombstone, Tombstone } from '@/components/Tombstone';
 import { getThread } from '@/lib/api';
@@ -49,6 +49,22 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   };
 }
 
+/**
+ * A reply's CID (search returns replies) opens the reply in its thread. The
+ * API answers it with the reply as the post and the root left out, so
+ * rendering it as a thread would show one without its OP under a new URL.
+ * The API hides rows one by one, so a root pending approval (or never indexed)
+ * can have served replies: redirect only while the root is served, and
+ * temporarily, since it can be hidden later. Otherwise the reply renders.
+ * The post_cid check keeps a malformed row from redirecting to itself.
+ */
+async function redirectReplyToThread(post: Comment): Promise<void> {
+  if (post.depth === 0 || post.post_cid === post.cid) return;
+  const root = await getThread(post.post_cid);
+  if (root.ok) redirect(commentPath(post));
+  if (root.reason === 'unavailable') throw new Error('The indexer API is unavailable.');
+}
+
 export default async function ThreadPage({ params }: Params) {
   const { cid } = await params;
   const res = await getThread(decodeURIComponent(cid));
@@ -61,11 +77,7 @@ export default async function ThreadPage({ params }: Params) {
   }
 
   const { post, replies } = res.data;
-  // A reply's CID (search returns replies) opens the reply in its thread. The
-  // API answers it with the reply as the post and the root left out, so
-  // rendering it here would show a thread without its OP under a new URL.
-  // The post_cid check keeps a malformed row from redirecting to itself.
-  if (post.depth > 0 && post.post_cid !== post.cid) permanentRedirect(commentPath(post));
+  await redirectReplyToThread(post);
 
   return (
     <article>
