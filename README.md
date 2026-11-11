@@ -112,13 +112,14 @@ the file is re-read whenever it changes, no restart needed; remove the entry
 and the stored content is served again (the redaction never destroys the
 archived data). A file that will not load (invalid JSON, unreadable, or behind
 a directory the server cannot read) keeps the last list that loaded; only a
-file that no longer exists empties the list. At startup there is no list to
-keep, so the server refuses to start until the file loads. Blocklisted
-comments leave listings and search but stay in threads as redacted tombstones, marked `takedown: 1` (plus the optional
-`takedown_reason`) on the API so UIs can distinguish them from upstream
-moderation, and they stay redacted across re-crawls. The bundled web UI shows
-them as `[removed — takedown request]` and documents the policy on its
-`/legal` page (see `CONTACT_EMAIL` below).
+file that does not exist empties the list. At startup there is no list to
+keep, so such a file stops the server from starting, while an absent file
+starts it with an empty list. Blocklisted comments leave listings and search
+but stay in threads as redacted tombstones, marked `takedown: 1` (plus the
+optional `takedown_reason`) on the API so UIs can distinguish them from
+upstream moderation, and they stay redacted across re-crawls. The bundled web
+UI shows them as `[removed — takedown request]` and documents the policy on
+its `/legal` page (see `CONTACT_EMAIL` below).
 
 #### NSFW communities
 
