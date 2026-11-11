@@ -82,8 +82,14 @@ export function getPkcClient(): Promise<PkcClient> {
  * connect log line of the replacement). Clearing the cache first lets new work
  * reconnect immediately; the generation guard keeps the old client's late
  * teardown from evicting that replacement.
+ *
+ * `client` scopes a timeout's reset to the client the timed-out call used. When
+ * that one is no longer cached, it was already retired and torn down (a peer
+ * crawl timed out on it first), and the cached client is a replacement other
+ * crawls are running on, so there is nothing left to reset.
  */
-export function resetPkcClient(opts: { quiet?: boolean } = {}): Promise<void> {
+export function resetPkcClient(opts: { quiet?: boolean; client?: Promise<PkcClient> } = {}): Promise<void> {
+  if (opts.client && opts.client !== clientPromise) return resetPromise ?? Promise.resolve();
   const doomed = clientPromise;
   clientPromise = null;
   if (!doomed) return resetPromise ?? Promise.resolve();

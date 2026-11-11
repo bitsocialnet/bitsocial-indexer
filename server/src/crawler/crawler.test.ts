@@ -501,3 +501,110 @@ test('a pass skips a community a reload dropped after the pass built its batch',
     setPkcClientForTest(null);
   }
 });
+
+const queueRow = (address: string) =>
+  getDb().prepare('SELECT status, last_error FROM crawl_queue WHERE community_address = ?').get(address) as
+    | { status: string; last_error: string | null }
+    | undefined;
+
+test('a community crawled in one pass is due again at the next tick, one interval after the pass began', async (t) => {
+  for (const address of queued()) dequeue(address);
+  const passStart = 1_700_000_000_000;
+  let now = passStart;
+  t.mock.method(Date, 'now', () => now);
+  const crawled: string[] = [];
+  // A pass recycles its client, so each pass gets a fresh one.
+  const install = () =>
+    setPkcClientForTest(
+      Promise.resolve({
+        getCommunity: async (address: string) => {
+          crawled.push(address);
+          // A crawl takes a few seconds, so it settles well after the tick began.
+          now += 3_000;
+          if (address === 'cadence-failing.bso') throw new Error('daemon said no');
+          return { posts: { pages: { new: { comments: [] } } } };
+        },
+        getComment: async () => ({}),
+        destroy: async () => {},
+      }),
+    );
+  try {
+    enqueue('cadence-ok.bso');
+    enqueue('cadence-failing.bso');
+    install();
+    await tick();
+    assert.equal(crawled.length, 2);
+    assert.equal(queueRow('cadence-failing.bso')?.status, 'failed');
+
+    // The interval timer fires next one interval after this pass began.
+    now = passStart + config.crawlIntervalMs;
+    install();
+    await tick();
+    assert.deepEqual(
+      crawled.sort(),
+      ['cadence-failing.bso', 'cadence-failing.bso', 'cadence-ok.bso', 'cadence-ok.bso'],
+      'both communities are refreshed at the next tick, not the one after it',
+    );
+  } finally {
+    setPkcClientForTest(null);
+    for (const address of queued()) dequeue(address);
+  }
+});
+
+test('a crawl timing out after a peer’s timeout reset leaves the replacement client alone', async () => {
+  for (const address of queued()) dequeue(address);
+  const timeout = config.crawlTimeoutMs;
+  const concurrency = config.crawlConcurrency;
+  Object.defineProperty(config, 'crawlTimeoutMs', { value: 50 });
+  Object.defineProperty(config, 'crawlConcurrency', { value: 2 });
+
+  // The replacement's call is in flight when the second hung crawl times out;
+  // destroying the replacement aborts it, as pkc-js does.
+  let answer!: (value: unknown) => void;
+  let abort!: (err: Error) => void;
+  const replacementCall = new Promise<unknown>((resolve, reject) => {
+    answer = resolve;
+    abort = reject;
+  });
+  const replacement = {
+    getCommunity: () => {
+      // Answer only once hung-b.bso, the second crawl to time out, has settled.
+      const poll = () => {
+        if (queueRow('hung-b.bso')?.status === 'running') setTimeout(poll, 1);
+        else answer({ posts: { pages: { new: { comments: [] } } } });
+      };
+      poll();
+      return replacementCall;
+    },
+    getComment: async () => ({}),
+    destroy: async () => abort(new Error('client destroyed')),
+  };
+  // Both hung crawls share this client. Tearing it down makes way for the
+  // replacement, the way the next getPkcClient() would connect one.
+  let replaced = false;
+  setPkcClientForTest(
+    Promise.resolve({
+      getCommunity: () => new Promise<never>(() => {}),
+      getComment: async () => ({}),
+      destroy: async () => {
+        if (replaced) return;
+        replaced = true;
+        setPkcClientForTest(Promise.resolve(replacement));
+      },
+    }),
+  );
+  try {
+    for (const address of ['hung-a.bso', 'hung-b.bso', 'healthy.bso']) enqueue(address);
+    // healthy.bso waits for the first free worker.
+    getDb().prepare('UPDATE crawl_queue SET next_run_at = next_run_at - 1 WHERE community_address LIKE ?').run('hung-%');
+    await tick();
+    assert.equal(queueRow('hung-a.bso')?.status, 'failed');
+    assert.equal(queueRow('hung-b.bso')?.status, 'failed');
+    assert.deepEqual(queueRow('healthy.bso'), { status: 'success', last_error: null });
+  } finally {
+    Object.defineProperty(config, 'crawlTimeoutMs', { value: timeout });
+    Object.defineProperty(config, 'crawlConcurrency', { value: concurrency });
+    setPkcClientForTest(null);
+    for (const address of queued()) dequeue(address);
+  }
+});

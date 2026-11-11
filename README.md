@@ -80,7 +80,7 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 | `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
-| `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
+| `CRAWL_INTERVAL_MS` | `60000` | How often each community is refreshed (one crawl pass per interval) |
 | `CRAWL_CONCURRENCY` | `4` | Maximum communities crawled at once |
 | `CRAWL_TIMEOUT_MS` | `300000` | Hard timeout for one community crawl; a timeout resets the RPC client |
 | `ALLOWED_ORIGINS` | `*` | CORS allow-list, comma-separated (`*` = any origin — fine for a public read-only API). An entry may contain `*` as a wildcard, e.g. `https://*.seedit.localhost` matches every branch-scoped dev origin. `CORS_ORIGIN` is accepted as a legacy fallback. |
