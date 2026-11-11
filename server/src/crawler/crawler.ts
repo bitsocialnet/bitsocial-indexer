@@ -531,9 +531,26 @@ let timer: NodeJS.Timeout | undefined;
 let reloadTimer: NodeJS.Timeout | undefined;
 let directoryTimer: NodeJS.Timeout | undefined;
 
+/**
+ * Read DIRECTORY_DEFAULTS_SOURCE, then retry on the reload interval until a
+ * read reaches every list.
+ */
+async function startDirectory(): Promise<void> {
+  if (await reloadDirectory()) return;
+  directoryTimer = setInterval(() => {
+    void reloadDirectory().then((complete) => {
+      if (complete) clearInterval(directoryTimer);
+    });
+  }, config.communitiesReloadMs);
+  console.log(`[crawler] retrying DIRECTORY_DEFAULTS_SOURCE every ${config.communitiesReloadMs}ms until it is read`);
+}
+
 export async function startCrawler(): Promise<void> {
   if (!hasConfiguredCommunities()) {
     console.log('[crawler] idle — no communities configured (COMMUNITIES / COMMUNITIES_SOURCE empty).');
+    // The archive is still served, and no stored NSFW flag is lowered until
+    // the directory has been read (see applyNsfwSignals).
+    if (config.directoryDefaultsSource) await startDirectory();
     return;
   }
   // An unreadable source still schedules the inline list and keeps the last
@@ -550,16 +567,8 @@ export async function startCrawler(): Promise<void> {
     if (removed.length) console.log(`[crawler] ${removed.length} communities left the list and are no longer crawled`);
   }
   // The directory verdicts outrank inference, so apply them before the first
-  // pass rather than after it. A read that missed any list is retried on the
-  // reload interval until every list has been read.
-  if (!(await reloadDirectory())) {
-    directoryTimer = setInterval(() => {
-      void reloadDirectory().then((complete) => {
-        if (complete) clearInterval(directoryTimer);
-      });
-    }, config.communitiesReloadMs);
-    console.log(`[crawler] retrying DIRECTORY_DEFAULTS_SOURCE every ${config.communitiesReloadMs}ms until it is read`);
-  }
+  // pass rather than after it.
+  await startDirectory();
   const reclaimed = reclaimAbandoned();
   if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
   console.log(

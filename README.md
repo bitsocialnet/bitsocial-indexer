@@ -169,7 +169,7 @@ DIRECTORY_DEFAULTS_SOURCE=https://raw.githubusercontent.com/bitsocialnet/lists/m
 Sibling file names follow the convention that repo documents, so one setting
 reaches every directory. A directory that states no `safeForWork`, or an address
 in no directory at all, contributes nothing and falls through to inference. Both
-files are read once, when the crawler schedules its communities. A read that
+files are read once, when the crawler starts, even an idle one. A read that
 fails (the defaults file, or any directory's list) is retried every
 `COMMUNITIES_RELOAD_MS` until every list has been read. Until then, after a
 restart too, NSFW verdicts apply as they are read, a retry keeps the ones an
