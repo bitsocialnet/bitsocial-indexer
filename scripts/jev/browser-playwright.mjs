@@ -1,13 +1,56 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, writeFile, rm, chmod, access } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, constants as osConstants } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { JevError } from "./client.mjs";
 
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
+
+/**
+ * promisify(execFile), plus the `detached` option that execFile silently drops. A detached child
+ * leads its own process group, so a Ctrl-C sent to the terminal's foreground group misses it.
+ * The detached path honours cwd, env and timeout only.
+ */
+export function execCommand(file, args, { detached, ...options } = {}) {
+  if (!detached) return execFileAsync(file, args, options);
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      cwd: options.cwd,
+      env: options.env,
+      detached,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "",
+      stderr = "",
+      killed = false;
+    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    // As execFile does: a grandchild such as a hung playwright-cli close keeps the pipes open, so
+    // without destroying them "close" would wait for it and the timeout would bound nothing.
+    const timer =
+      options.timeout &&
+      setTimeout(() => {
+        killed = true;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.kill();
+      }, options.timeout);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout, stderr });
+      const error = new Error(`Command failed: ${file}`);
+      reject(Object.assign(error, { code, signal, killed, stdout, stderr }));
+    });
+  });
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const locatorCode = `function locate(target) {
   let parent = page;
@@ -68,13 +111,51 @@ export async function findPlaywrightCli() {
   return "playwright-cli";
 }
 
-export function createPlaywrightDriver({ execute = exec } = {}) {
+// Ctrl-C, a harness timeout and a closed terminal respectively.
+const terminationSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+/**
+ * Without a handler, SIGINT/SIGTERM/SIGHUP end Node before runBrowserPlan's finally runs, and
+ * the detached browser keeps running and holding the machine-wide slot. While registered, the
+ * first signal closes the driver and then exits with the conventional 128+signal status.
+ * Repeated signals are ignored until that close settles: exiting earlier would abandon a close
+ * that may still be waiting for a browser to open. The open and close timeouts bound the wait;
+ * SIGKILL cannot be intercepted. The returned release waits for a close a signal started, and
+ * the exit after it, so a caller cannot start another browser in between; then it removes the
+ * handlers.
+ */
+export function closeOnTermination(
+  driver,
+  { target = process, exit = (status) => process.exit(status) } = {},
+) {
+  let stopping;
+  const handler = (signal) => {
+    stopping ||= (async () => {
+      try {
+        await driver.close();
+      } catch {
+        /* Exiting either way; a failed close cannot be retried from here. */
+      }
+      exit(128 + osConstants.signals[signal]);
+    })();
+  };
+  for (const signal of terminationSignals) target.on(signal, handler);
+  return async () => {
+    await stopping;
+    for (const signal of terminationSignals) target.off(signal, handler);
+  };
+}
+
+export function createPlaywrightDriver({ execute = execCommand } = {}) {
   const session = `jev-${process.pid}-${randomBytes(4).toString("hex")}`;
   let directory,
     cli,
     plan,
     started,
-    combinedObservation = false,
+    opened,
+    closing,
+    // "unknown" until the capability probe proves which observation transport is usable.
+    observationMode = "unknown",
     opening = false;
   const childEnv = { ...process.env };
   delete childEnv.TYPESAFE_API_KEY;
@@ -82,6 +163,8 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
   delete childEnv.JEV_CONFIG_FILE;
   delete childEnv.JEV_MODEL;
   async function command(args, wrapper = false, cleanup = false) {
+    // Once close has begun, for example from a termination signal, no new browser work starts.
+    if (closing && !cleanup) throw new JevError("browser_closed");
     const remaining = cleanup ? 15_000 : plan.limits.deadlineMs - (Date.now() - started);
     if (remaining <= 0) throw new JevError("deadline_exceeded");
     try {
@@ -90,6 +173,9 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
         env: { ...childEnv, PLAYWRIGHT_CLI_BIN: cli },
         timeout: Math.min(remaining, 30_000),
         maxBuffer: 512_000,
+        // Its own process group: a repeated Ctrl-C reaches the whole foreground group and
+        // would otherwise kill the close before it stops the browser and releases the slot.
+        detached: cleanup,
       });
       if (
         cleanup &&
@@ -126,7 +212,7 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
   }
   return {
     get adapterMode() {
-      return combinedObservation ? "combined-aria" : "snapshot-command";
+      return observationMode;
     },
     async open(validatedPlan) {
       plan = validatedPlan;
@@ -145,10 +231,11 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
       );
       opening = true;
       // Start blank so navigation guards exist before the plan URL is visited.
-      await command(
+      opened = command(
         ["open", session, "about:blank", "--browser=chrome", `--config=${config}`],
         true,
       );
+      await opened;
       const capabilities = await code(`
         const origin = ${JSON.stringify(plan.origin)};
         const navigationAllowed = ${canonicalNavigationAllowed.toString()};
@@ -164,10 +251,10 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
         await page.goto(${JSON.stringify(plan.url)}, {waitUntil: 'domcontentloaded'});
         return {ariaSnapshot: typeof page.ariaSnapshot === 'function'};
       `);
-      combinedObservation = capabilities?.ariaSnapshot === true;
+      observationMode = capabilities?.ariaSnapshot === true ? "combined-aria" : "snapshot-command";
     },
     async observe(assertions = []) {
-      if (combinedObservation) {
+      if (observationMode === "combined-aria") {
         const observation = await code(`${guard()}
           const snapshot = await page.ariaSnapshot({mode: 'ai'});
           ${assertionCode(assertions)}
@@ -181,7 +268,7 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
           /\[ref=[a-zA-Z0-9_-]+\]/.test(observation.snapshot)
         )
           return observation;
-        combinedObservation = false;
+        observationMode = "snapshot-command";
       }
       // Older installed CLIs keep their supported snapshot command. Never substitute
       // a ref-less default ARIA snapshot or silently retry a failing combined call.
@@ -227,12 +314,19 @@ export function createPlaywrightDriver({ execute = exec } = {}) {
     async reload() {
       await code(`${guard()} await page.reload({waitUntil: 'domcontentloaded'}); return true;`);
     },
-    async close() {
-      try {
-        if (opening) await command(["close", session], true, true);
-      } finally {
-        if (directory) await rm(directory, { recursive: true, force: true });
-      }
+    close() {
+      // Shared: a termination signal and runBrowserPlan's finally can both close the driver.
+      closing ||= (async () => {
+        // A wrapper open still starting the browser settles first, so this close stops that
+        // browser instead of racing it and leaving it running.
+        await opened?.catch(() => {});
+        try {
+          if (opening) await command(["close", session], true, true);
+        } finally {
+          if (directory) await rm(directory, { recursive: true, force: true });
+        }
+      })();
+      return closing;
     },
   };
 }

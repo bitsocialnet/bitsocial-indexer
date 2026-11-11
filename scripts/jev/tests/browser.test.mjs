@@ -5,15 +5,19 @@ import { createJevClient, JevError } from "../client.mjs";
 import {
   canonicalNavigationAllowed,
   browserOriginGuard,
+  closeOnTermination,
   createPlaywrightDriver,
+  execCommand,
   findPlaywrightCli,
 } from "../browser-playwright.mjs";
+import { EventEmitter } from "node:events";
 import { runInNewContext } from "node:vm";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { runWithFakeCli } from "./fake-playwright-cli.mjs";
 
 const basePlan = () => ({
   version: 1,
@@ -118,6 +122,218 @@ test("a wrapper close warning with exit zero is still a cleanup failure", async 
   await driver.open(validatePlan(basePlan()));
   await assert.rejects(driver.close(), { code: "cleanup_failed" });
   assert.equal(closed, 1);
+});
+
+test("SIGTERM during a live run closes the owned browser and releases the shared slot", async () => {
+  const run = await runWithFakeCli(
+    fileURLToPath(new URL("../browser.mjs", import.meta.url)),
+    ["--live", "--baseline"],
+    "hang",
+  );
+  try {
+    await run.waitUntilRunning();
+    assert.equal(await run.lockHeld(), true);
+    run.child.kill("SIGTERM");
+    const { code, signal } = await run.exited;
+    assert.deepEqual({ code, signal }, { code: 143, signal: null });
+    assert.ok((await run.calls()).some((line) => /^-s=jev-\d+-[0-9a-f]+ close$/.test(line)));
+    assert.equal(await run.browserRunning(), false);
+    assert.equal(await run.lockHeld(), false);
+  } finally {
+    await run.cleanup();
+  }
+});
+
+test("a termination signal closes the driver before exiting; repeated signals wait for that close", async () => {
+  const target = new EventEmitter();
+  const exits = [];
+  let closes = 0,
+    finishClose;
+  const release = closeOnTermination(
+    {
+      close: () => {
+        closes++;
+        return new Promise((resolve) => (finishClose = resolve));
+      },
+    },
+    { target, exit: (status) => exits.push(status) },
+  );
+  target.emit("SIGTERM", "SIGTERM");
+  assert.equal(closes, 1);
+  // Exiting now would abandon the close, which may still be waiting for a browser to open.
+  target.emit("SIGINT", "SIGINT");
+  target.emit("SIGTERM", "SIGTERM");
+  assert.deepEqual(exits, []);
+  const released = release();
+  await new Promise((resolve) => setImmediate(resolve));
+  // Still handled, so another signal cannot end Node by default before the close settles.
+  assert.equal(target.listenerCount("SIGINT"), 1);
+  finishClose();
+  await released;
+  assert.deepEqual(exits, [143]);
+  assert.equal(closes, 1);
+  // Closing the terminal sends SIGHUP, which would otherwise end Node just the same.
+  const hangup = closeOnTermination(
+    { close: async () => {} },
+    { target, exit: (status) => exits.push(status) },
+  );
+  target.emit("SIGHUP", "SIGHUP");
+  await hangup();
+  assert.deepEqual(exits, [143, 129]);
+  await closeOnTermination({ close: async () => {} }, { target })();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+    assert.equal(target.listenerCount(signal), 0);
+});
+
+test("a detached command leads its own process group and keeps execFile's results", async () => {
+  const { stdout, stderr } = await execCommand(
+    "/bin/sh",
+    ["-c", 'echo "$$ $(ps -o pgid= -p $$)"; echo warning >&2'],
+    { detached: true },
+  );
+  const [pid, group] = stdout.trim().split(/\s+/);
+  assert.equal(group, pid);
+  assert.equal(stderr, "warning\n");
+  await assert.rejects(execCommand("/bin/sh", ["-c", "exit 3"], { detached: true }), {
+    code: 3,
+    killed: false,
+  });
+  await assert.rejects(execCommand("/bin/sleep", ["5"], { detached: true, timeout: 50 }), {
+    killed: true,
+  });
+});
+
+test("a detached command settles at its timeout while a grandchild still holds its output", async () => {
+  // Like pw-session.sh close waiting on a hung playwright-cli close: killing the direct child
+  // leaves the grandchild holding the pipes, and the timeout must still bound the command.
+  const started = Date.now();
+  const error = await execCommand("/bin/bash", ["-c", "echo $$; sleep 5; true"], {
+    detached: true,
+    timeout: 200,
+  }).then(
+    () => assert.fail("the command should time out"),
+    (error) => error,
+  );
+  const elapsed = Date.now() - started;
+  const group = Number(error.stdout?.trim());
+  if (group > 0) {
+    try {
+      process.kill(-group, "SIGKILL");
+    } catch {
+      /* The grandchild already exited. */
+    }
+  }
+  assert.equal(error.killed, true);
+  assert.ok(elapsed < 2_000, `settled after ${elapsed}ms`);
+});
+
+const browserEntry = fileURLToPath(new URL("../browser.mjs", import.meta.url));
+// Command names only; a run-code body spans several logged lines.
+const callNames = async (run) =>
+  (await run.calls())
+    .filter((line) => line.startsWith("-s=") || line === "open-done")
+    .map((line) => line.replace(/^-s=\S+ /, "").split(" ")[0]);
+
+test("a repeated SIGTERM while the browser is opening still closes it once after the open", async () => {
+  const run = await runWithFakeCli(browserEntry, ["--live", "--baseline"], "slow-open");
+  try {
+    await run.waitUntilRunning();
+    run.child.kill("SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    run.child.kill("SIGTERM");
+    const { code, signal } = await run.exited;
+    assert.deepEqual({ code, signal }, { code: 143, signal: null });
+    // An open orphaned by an early exit would only finish now.
+    await run.waitForCall("open-done");
+    assert.deepEqual(await callNames(run), ["open", "open-done", "close"]);
+    assert.equal(await run.browserRunning(), false);
+    assert.equal(await run.lockHeld(), false);
+    assert.deepEqual(await run.tempLeft(), []);
+  } finally {
+    await run.cleanup();
+  }
+});
+
+test("a second Ctrl-C during the close neither exits early nor interrupts the close", async () => {
+  const run = await runWithFakeCli(browserEntry, ["--live", "--baseline"], "hang slow-close");
+  try {
+    await run.waitUntilRunning();
+    // Ctrl-C reaches the whole foreground process group, not only Node.
+    process.kill(-run.child.pid, "SIGINT");
+    await run.waitUntilRunning("closing");
+    process.kill(-run.child.pid, "SIGINT");
+    const { code, signal } = await run.exited;
+    assert.deepEqual({ code, signal }, { code: 130, signal: null });
+    assert.deepEqual(await callNames(run), ["open", "open-done", "run-code", "close"]);
+    assert.equal(await run.browserRunning(), false);
+    assert.equal(await run.lockHeld(), false);
+    assert.deepEqual(await run.tempLeft(), []);
+  } finally {
+    await run.cleanup();
+  }
+});
+
+test("closing during a wrapper open waits for it, closes once and starts no further command", async () => {
+  const calls = [];
+  let finishOpen;
+  const driver = createPlaywrightDriver({
+    execute: async (_file, args) => {
+      calls.push(["open", "close"].includes(args[0]) ? args[0] : args[1]);
+      if (args[0] === "open") await new Promise((resolve) => (finishOpen = resolve));
+      return { stdout: "### Result\ntrue\n", stderr: "" };
+    },
+  });
+  const opened = driver.open(validatePlan(basePlan()));
+  while (!finishOpen) await new Promise((resolve) => setImmediate(resolve));
+  const closes = [driver.close(), driver.close()];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["open"]);
+  finishOpen();
+  await assert.rejects(opened, { code: "browser_closed" });
+  await Promise.all(closes);
+  assert.deepEqual(calls, ["open", "close"]);
+});
+
+test("a cleanup failure keeps the run's own failure reason and is flagged separately", async () => {
+  const close = async () => {
+    throw Error("private details");
+  };
+  const drift = await runBrowserPlan(basePlan(), {
+    driver: fixtureDriver({
+      observe: async () => ({ url: "https://example.com", snapshot: snapshots[0] }),
+      close,
+    }),
+    baseline: true,
+  });
+  assert.equal(drift.status, "incomplete");
+  assert.equal(drift.reason, "origin_changed");
+  assert.equal(drift.cleanupFailed, true);
+  const plan = basePlan();
+  plan.semanticChecks = [
+    { id: "clarity", role: "status", name: "", criterion: "Explains next action" },
+  ];
+  const semantic = await runBrowserPlan(plan, {
+    driver: fixtureDriver({ close }),
+    baseline: true,
+  });
+  assert.equal(semantic.flowCompleted, true);
+  assert.equal(semantic.reason, "semantic_not_run");
+  assert.equal(semantic.cleanupFailed, true);
+  const clean = await runBrowserPlan(basePlan(), { driver: fixtureDriver(), baseline: true });
+  assert.equal(clean.cleanupFailed, false);
+});
+
+test("a run that ends before its first observation reports an unknown adapter mode", async () => {
+  const driver = createPlaywrightDriver({
+    execute: async (_file, args) => {
+      if (args[0] === "open") throw Object.assign(new Error("slot held"), { code: 75 });
+      throw new Error("no command may follow a refused open");
+    },
+  });
+  assert.equal(driver.adapterMode, "unknown");
+  const report = await runBrowserPlan(basePlan(), { driver, baseline: true });
+  assert.equal(report.reason, "browser_slot_busy");
+  assert.equal(report.adapterMode, "unknown");
 });
 
 test("browser commands never inherit the key, model or credential-location overrides", async () => {
