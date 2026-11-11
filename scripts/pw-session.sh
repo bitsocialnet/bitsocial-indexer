@@ -26,6 +26,11 @@ umask 077
 # that phase. The lock counts as held while that process is alive, for at most
 # a couple of minutes, so a wrapper killed mid-launch never pins the slot.
 #
+# Creating the lock with its metadata, and checking then renaming it away, each
+# run under a short kernel lock on `<lock>.mutex` (see serialize), so a lock
+# cannot change between a check and the rename, and the path is never left
+# open to another wrapper while a lock renamed by mistake is put back.
+#
 # PW_SESSION_POLL_SECONDS overrides how often `--wait` re-checks the slot.
 
 usage() {
@@ -68,6 +73,8 @@ owner_file="$lock_dir/owner"
 started_file="$lock_dir/started-at"
 workspace_file="$lock_dir/workspace"
 pid_file="$lock_dir/pid"
+mutex_file="${lock_dir}.mutex"
+mutex_wait_seconds=10
 transition_limit_seconds=120
 default_wait_seconds=300
 poll_seconds="${PW_SESSION_POLL_SECONDS:-5}"
@@ -75,6 +82,45 @@ poll_seconds="${PW_SESSION_POLL_SECONDS:-5}"
 # Recorded for diagnostics only: the lock is machine-wide, so a checkout outside
 # a Git worktree is unusual but not an error.
 workspace="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Takes the mutex: a flock(2) lock on fd 9, through whichever of flock, lockf
+# or perl exists. The kernel drops it once every process holding fd 9 has
+# exited, so a wrapper killed while holding it never pins it, and the file is
+# never deleted, so there is no stale mutex to recover. Hold it only around
+# quick steps, and call unserialize before starting a browser, which would
+# otherwise inherit fd 9 and keep the mutex for its whole life. With none of the
+# three tools the steps run unserialized, as in copies of this script that
+# predate the mutex.
+serialize() {
+  if ! { exec 9>>"$mutex_file"; } 2>/dev/null; then
+    echo "pw-session: cannot open $mutex_file" >&2
+    return 1
+  fi
+  if command -v flock >/dev/null 2>&1; then
+    flock -w "$mutex_wait_seconds" 9 && return 0
+  elif command -v lockf >/dev/null 2>&1; then
+    lockf -s -t "$mutex_wait_seconds" 9 && return 0
+  elif command -v perl >/dev/null 2>&1; then
+    # Polls without blocking, so the wait stays bounded.
+    perl -MFcntl=:flock -e '
+      open(my $fh, ">&=", 9) or exit 1;
+      for (0 .. $ARGV[0] * 20) {
+        exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+        select(undef, undef, undef, 0.05);
+      }
+      exit 75;
+    ' "$mutex_wait_seconds" && return 0
+  else
+    return 0
+  fi
+  unserialize
+  echo "pw-session: could not lock $mutex_file within ${mutex_wait_seconds}s" >&2
+  return 1
+}
+
+unserialize() {
+  exec 9>&-
+}
 
 validate_session() {
   local session="$1"
@@ -237,12 +283,15 @@ print_status() {
   esac
 }
 
-# Takes the lock out of service with one rename, then checks that the renamed
-# lock is the one the caller judged (`expected`, from lock_identity). A newer
-# lock that took its place in between is put back instead of being deleted.
+# Removes the lock if it is still the one the caller judged (`expected`, from
+# lock_identity). Call it under serialize. One rename takes the lock out of
+# service, so no contender sees it half-deleted. The renamed lock is checked
+# again because a copy of this script without the mutex can still replace the
+# lock in between; such a lock is put back instead of being deleted.
 remove_lock_if() {
   local expected="$1" staged="${lock_dir}.$2.$$" name
 
+  lock_matches "$lock_dir" "$expected" || return 1
   rm -rf "$staged"
   if ! mv "$lock_dir" "$staged" 2>/dev/null; then
     return 1
@@ -271,7 +320,7 @@ remove_lock_if() {
 reclaim_stale_lock() {
   local owner="$1" expected="$2"
 
-  if lock_matches "$lock_dir" "$expected" && remove_lock_if "$expected" stale; then
+  if remove_lock_if "$expected" stale; then
     echo "pw-session: reclaimed stale slot from '$owner' (its browser is no longer running)" >&2
   fi
 }
@@ -284,11 +333,17 @@ acquire() {
 
   SECONDS=0
   while true; do
+    # Under the mutex, no reclaim sees this lock before its metadata is
+    # written, and this mkdir never lands while a reclaim has a lock renamed
+    # away.
+    serialize || return 75
     if mkdir "$lock_dir" 2>/dev/null; then
       write_lock_metadata "$session"
+      unserialize
       echo "pw-session: acquired browser slot for '$session'"
       return 0
     fi
+    unserialize
 
     # Identity first: if the lock changes before the owner is read, the
     # verdict below then belongs to a newer lock and reclaim leaves it alone.
@@ -299,7 +354,9 @@ acquire() {
     # Bounded so an unremovable lock directory fails loudly instead of spinning.
     if [ "$state" = dead ] && [ "$reclaims" -lt 3 ]; then
       reclaims=$((reclaims + 1))
+      serialize || return 75
       reclaim_stale_lock "${owner:-unknown}" "$identity"
+      unserialize
       continue
     fi
 
@@ -344,12 +401,14 @@ release() {
     return 1
   fi
 
-  # One rename removes the whole lock, so no contender sees it half-deleted,
-  # and a lock that replaced ours after the check above stays in place.
+  # A lock that replaced ours after the check above stays in place.
+  serialize || return 1
   if ! remove_lock_if "$identity" release; then
+    unserialize
     echo "pw-session: the slot changed hands while '$session' released it; left it untouched" >&2
     return 1
   fi
+  unserialize
   echo "pw-session: released browser slot for '$session'"
 }
 

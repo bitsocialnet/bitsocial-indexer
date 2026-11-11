@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,12 @@ case "\${1:-}" in
       printf -- '- %s:\\n  - status: open\\n' "\${entry##*/open-}"
     done
     ;;
-  open) gate "open-$session"; : >"$state/open-$session" ;;
+  open)
+    # A browser that inherited the wrapper's mutex descriptor would hold the
+    # mutex for its whole life.
+    if { : >&9; } 2>/dev/null; then echo "fake playwright-cli: inherited fd 9" >&2; exit 1; fi
+    gate "open-$session"; : >"$state/open-$session"
+    ;;
   close) rm -f "$state/open-$session"; gate "close-$session" ;;
 esac
 `;
@@ -45,6 +50,42 @@ if [ -e "$FAKE_PW_STATE/hold-find" ]; then
 fi
 if [ -n "$out" ]; then printf '%s\\n' "$out"; fi
 `;
+// Also first on PATH, for a caller started with FAKE_PW_GATE_RECLAIM: rm holds
+// just before a reclaim renames the lock away, and mkdir holds just before a
+// lock renamed by mistake is put back.
+const gateFunction = `gate() {
+  if [ -e "$FAKE_PW_STATE/hold-$1" ]; then
+    : >"$FAKE_PW_STATE/entered-$1"
+    while [ -e "$FAKE_PW_STATE/hold-$1" ]; do sleep 0.02; done
+  fi
+}`;
+const fakeRm = `#!/bin/bash
+${gateFunction}
+case " $* " in
+  *.stale.*) if [ -n "\${FAKE_PW_GATE_RECLAIM:-}" ]; then gate rm; fi ;;
+esac
+PATH="$FAKE_REAL_PATH"
+exec rm "$@"
+`;
+const fakeMkdir = `#!/bin/bash
+${gateFunction}
+if [ -n "\${FAKE_PW_GATE_RECLAIM:-}" ]; then
+  for staged in "$PLAYWRIGHT_RESOURCE_LOCK_DIR".stale.*; do
+    if [ -d "$staged" ]; then gate mkdir; fi
+  done
+fi
+PATH="$FAKE_REAL_PATH"
+exec mkdir "$@"
+`;
+
+// Finds a command on this process's PATH.
+function which(name) {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    const candidate = path.join(directory, name);
+    if (directory && existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 
 async function harness(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "pw-session-test-"));
@@ -57,9 +98,27 @@ async function harness(t) {
   await writeFile(cli, fakeCli);
   await chmod(cli, 0o755);
   await mkdir(bin);
-  await writeFile(path.join(bin, "find"), fakeFind);
-  await chmod(path.join(bin, "find"), 0o755);
-  const withFakeFind = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_REAL_PATH: process.env.PATH };
+  for (const [name, source] of [
+    ["find", fakeFind],
+    ["rm", fakeRm],
+    ["mkdir", fakeMkdir],
+  ]) {
+    await writeFile(path.join(bin, name), source);
+    await chmod(path.join(bin, name), 0o755);
+  }
+  const withFakeTools = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_REAL_PATH: process.env.PATH };
+  // The same, minus flock and lockf, so the wrapper falls back to perl for its
+  // mutex. Null when this machine has no perl.
+  const perlOnlyTools = async () => {
+    if (!which("perl")) return null;
+    const tools = path.join(directory, "perl-only");
+    await mkdir(tools);
+    for (const name of ["bash", "date", "dirname", "find", "mkdir", "mv", "perl", "rm", "sed", "sleep"]) {
+      const found = which(name);
+      if (found) await symlink(found, path.join(tools, name));
+    }
+    return { ...withFakeTools, PATH: `${bin}${path.delimiter}${tools}` };
+  };
   const run = (args, extraEnv = {}) =>
     new Promise((resolve, reject) => {
       const child = spawn("bash", [wrapper, ...args], {
@@ -104,7 +163,7 @@ async function harness(t) {
     await writeFile(path.join(lock, "started-at"), "2020-01-01T00:00:00Z\n");
     await writeFile(path.join(lock, "workspace"), `${directory}\n`);
   };
-  return { lock, run, hold, unhold, entered, owner, staleLock, withFakeFind };
+  return { lock, state, run, hold, unhold, entered, owner, staleLock, withFakeTools, perlOnlyTools };
 }
 
 test("a slot whose browser is still launching is not reclaimed by another open", async (t) => {
@@ -195,13 +254,13 @@ test("a second reclaimer of the same stale lock leaves the fresh lock alone", as
 });
 
 test("a fresh ownerless lock is not taken for the old one it replaced", async (t) => {
-  const { lock, run, hold, unhold, entered, withFakeFind } = await harness(t);
+  const { lock, run, hold, unhold, entered, withFakeTools } = await harness(t);
   await mkdir(lock);
   const old = new Date(Date.now() - 10 * 60 * 1000);
   await utimes(lock, old, old);
   // C judges the old ownerless lock dead, then stalls before acting on that.
   await hold("find");
-  const late = run(["open", "c"], withFakeFind);
+  const late = run(["open", "c"], withFakeTools);
   await entered("find");
 
   // Meanwhile another contender reclaims it and has only just created its own
@@ -216,3 +275,41 @@ test("a fresh ownerless lock is not taken for the old one it replaced", async (t
   assert.doesNotMatch(result.stderr, /reclaimed stale slot/);
   assert.ok(existsSync(path.join(lock, "marker")), "the fresh lock was replaced");
 });
+
+for (const mutex of ["default", "perl"]) {
+  test(`a lock renamed by mistake is put back before another open can take the path (${mutex} mutex)`, async (t) => {
+    const { lock, state, run, hold, unhold, entered, owner, staleLock, withFakeTools, perlOnlyTools } = await harness(t);
+    const tools = mutex === "perl" ? await perlOnlyTools() : withFakeTools;
+    if (!tools) {
+      t.skip("perl is not installed");
+      return;
+    }
+    await staleLock("x");
+    // R judges `x` stale and stalls just before renaming the lock away.
+    await hold("rm");
+    await hold("mkdir");
+    const reclaimer = run(["open", "r"], { ...tools, FAKE_PW_GATE_RECLAIM: "1" });
+    await entered("rm");
+
+    // Meanwhile `x` is replaced by a live lock for `b`, as a copy of the
+    // wrapper that does not take the mutex would do.
+    await rm(lock, { recursive: true });
+    await staleLock("b");
+    await writeFile(path.join(state, "open-b"), "");
+
+    // R renames b's lock by mistake and stalls before putting it back. The lock
+    // path is empty now, so another open must not get to create a lock there.
+    await unhold("rm");
+    await entered("mkdir");
+    const third = run(["open", "c"], tools);
+    await Promise.race([third, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    await unhold("mkdir");
+
+    const [late, first] = await Promise.all([third, reclaimer]);
+    assert.equal(late.code, 75, late.stderr);
+    assert.equal(first.code, 75, first.stderr);
+    assert.doesNotMatch(first.stderr, /could not restore/);
+    assert.equal(await owner(), "b");
+    assert.ok(!existsSync(path.join(state, "open-c")), "a second browser was opened");
+  });
+}
