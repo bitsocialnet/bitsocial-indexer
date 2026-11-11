@@ -240,6 +240,9 @@ try {
       }
     }
   });
+  // A signal that lands during the server or browser cleanup has nothing left
+  // to stop, but the run was still interrupted and must not report success.
+  abort.signal.throwIfAborted();
   report.ok = command === 'selftest' ? !!report.selftest?.ok : report.cases.length > 0 && report.cases.every((result) => result.ok);
 } catch (error) {
   report.error = error.stack || error.message;
