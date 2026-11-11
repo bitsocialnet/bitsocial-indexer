@@ -13,6 +13,39 @@ function score(c: Comment) {
   return c.upvote_count - c.downvote_count;
 }
 
+/** A thread's OP. The post_cid check treats a malformed row as one. */
+function isRoot(c: Comment): boolean {
+  return c.depth === 0 || c.post_cid === c.cid;
+}
+
+/**
+ * The replies listed under `post`. For a reply (rendered only when the API
+ * hides its root), the API still returns every served reply in the root's
+ * thread, the reply itself and its siblings included, so keep only its
+ * descendants. Linked by parent_cid rather than position: replies come sorted
+ * by timestamp, which the author's client sets.
+ */
+function repliesUnder(post: Comment, replies: Comment[]): Comment[] {
+  if (isRoot(post)) return replies;
+  const children = new Map<string, Comment[]>();
+  for (const r of replies) {
+    if (r.parent_cid === null) continue;
+    const siblings = children.get(r.parent_cid);
+    if (siblings) siblings.push(r);
+    else children.set(r.parent_cid, [r]);
+  }
+  const under = new Set([post.cid]);
+  const queue = [post.cid];
+  for (let cid = queue.pop(); cid !== undefined; cid = queue.pop()) {
+    for (const child of children.get(cid) ?? []) {
+      if (under.has(child.cid)) continue;
+      under.add(child.cid);
+      queue.push(child.cid);
+    }
+  }
+  return replies.filter((r) => r.cid !== post.cid && under.has(r.cid));
+}
+
 function threadTitle(post: Comment): string {
   if (post.takedown || post.removed) return '[removed]';
   if (post.deleted) return '[deleted]';
@@ -56,10 +89,10 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
  * The API hides rows one by one, so a root pending approval (or never indexed)
  * can have served replies: redirect only while the root is served, and
  * temporarily, since it can be hidden later. Otherwise the reply renders.
- * The post_cid check keeps a malformed row from redirecting to itself.
+ * isRoot's post_cid check keeps a malformed row from redirecting to itself.
  */
 async function redirectReplyToThread(post: Comment): Promise<void> {
-  if (post.depth === 0 || post.post_cid === post.cid) return;
+  if (isRoot(post)) return;
   const root = await getThread(post.post_cid);
   if (root.ok) redirect(commentPath(post));
   if (root.reason === 'unavailable') throw new Error('The indexer API is unavailable.');
@@ -76,8 +109,9 @@ export default async function ThreadPage({ params }: Params) {
     throw new Error('The indexer API is unavailable.');
   }
 
-  const { post, replies } = res.data;
+  const { post } = res.data;
   await redirectReplyToThread(post);
+  const replies = repliesUnder(post, res.data.replies);
 
   return (
     <article>
