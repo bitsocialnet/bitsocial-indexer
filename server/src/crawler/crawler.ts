@@ -129,12 +129,30 @@ export function parseCommunityEntry(item: unknown): string | null {
 /** Bounds one list fetch, so a source that never answers cannot stall a reload forever. */
 const SOURCE_TIMEOUT_MS = 30_000;
 
+class HttpStatusError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+/**
+ * The source answered that it does not exist (HTTP 404, or no such local file),
+ * as opposed to failing to answer.
+ */
+function isMissingSource(err: unknown): boolean {
+  if (err instanceof HttpStatusError) return err.status === 404;
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 /** A JSON source is either an http(s) URL or a local file path. */
 async function loadJson(source: string): Promise<unknown> {
   if (/^https?:\/\//.test(source)) {
     const res = await fetch(source, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) });
     // An error body can be valid JSON; it is still not the list.
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new HttpStatusError(res.status);
     return res.json();
   }
   const { readFile } = await import('node:fs/promises');
@@ -175,7 +193,10 @@ export interface DirectorySafeForWork {
 
 export interface DirectoryRead {
   entries: DirectorySafeForWork[];
-  /** False when some directory's address list could not be read. */
+  /**
+   * False when some directory's address list could not be read. A list the
+   * source reports missing (HTTP 404, no such file) counts as read and empty.
+   */
   complete: boolean;
 }
 
@@ -236,8 +257,12 @@ export async function resolveDirectorySafeForWork(
       }
     } catch (err) {
       // One unreachable directory file must not cost the others their verdict.
-      complete = false;
       console.error(`[crawler] directory ${code}: ${err instanceof Error ? err.message : String(err)}`);
+      // A list the source says does not exist is an answer: that directory
+      // names no address. Only a list that could not be read leaves the read
+      // incomplete; waiting for one that does not exist would stop every
+      // stored NSFW flag from being lowered, for good.
+      if (!isMissingSource(err)) complete = false;
     }
   });
   return { entries, complete };

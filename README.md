@@ -174,7 +174,9 @@ fails (the defaults file, or any directory's list) is retried every
 restart too, NSFW verdicts apply as they are read, a retry keeps the ones an
 earlier attempt read, and none is lowered: a community keeps the NSFW flag
 stored from the last run unless its operator override or its own
-`safeForWork` says otherwise.
+`safeForWork` says otherwise. A directory's list that the source reports
+missing (HTTP 404, or no such file) is not a failed read: that directory names
+no address.
 
 `GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
 anything NSFW — the comment is flagged, or its community is — and `true`
