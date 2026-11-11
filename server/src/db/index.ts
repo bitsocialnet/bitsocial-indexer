@@ -488,10 +488,14 @@ export function setNsfwOverrides(entries: NsfwOverride[]): void {
  * takes the stricter verdict — one NSFW directory is enough to keep it out of a
  * safe-default search. `complete` is false when some directory's list could not
  * be read: NSFW verdicts among the entries apply at once, but no stored NSFW
- * verdict is lowered until a complete read (see applyNsfwSignals).
+ * verdict is lowered until a complete read (see applyNsfwSignals). A partial
+ * read adds to the verdicts earlier reads found rather than replacing them: the
+ * list it missed may be one an earlier read reached, and a community added
+ * since has no stored verdict to fall back on. Only a complete read replaces
+ * the lot.
  */
 export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[], complete = true): void {
-  const next = new Map<string, boolean>();
+  const next = complete ? new Map<string, boolean>() : new Map(directorySafeForWork);
   for (const { address, safeForWork } of entries) next.set(address, (next.get(address) ?? true) && safeForWork);
   directorySafeForWork = next;
   directoryComplete = complete;

@@ -114,6 +114,17 @@ test('signals that outrank the directory still decide while it is unread', () =>
   setNsfwOverrides([]);
 });
 
+test('a partial retry keeps the verdicts an earlier partial read found', () => {
+  // The first read reached the NSFW directory's list but not another one; the
+  // retry reaches the other list but not the NSFW one.
+  setDirectorySafeForWork([{ address: 'read-first-time.bso', safeForWork: false }], false);
+  setDirectorySafeForWork([{ address: 'read-second-time.bso', safeForWork: true }], false);
+  // Added since (a reloaded COMMUNITIES_SOURCE), so it has no stored verdict to keep.
+  upsertCommunity({ address: 'read-first-time.bso' });
+  setNsfwOverrides([]); // any re-resolution
+  assert.equal(nsfw('read-first-time.bso'), 1, 'the NSFW verdict read the first time still applies');
+});
+
 test('a complete read settles every address', () => {
   setDirectorySafeForWork([
     { address: 'dir-only.bso', safeForWork: false },
@@ -125,4 +136,5 @@ test('a complete read settles every address', () => {
   assert.equal(nsfw('flagged.bso'), 0, 'the directory outranks inference');
   assert.equal(nsfw('unread-list.bso'), 0, 'listed nowhere, nothing flagged');
   assert.equal(nsfw('newly-listed.bso'), 0, 'no longer listed, nothing flagged');
+  assert.equal(nsfw('read-first-time.bso'), 0, 'a complete read replaces what the partial reads gathered');
 });

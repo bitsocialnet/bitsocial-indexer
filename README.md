@@ -171,9 +171,10 @@ in no directory at all, contributes nothing and falls through to inference. Both
 files are read once, when the crawler schedules its communities. A read that
 fails (the defaults file, or any directory's list) is retried every
 `COMMUNITIES_RELOAD_MS` until every list has been read. Until then, after a
-restart too, NSFW verdicts apply as they are read but none is lowered: a
-community keeps the NSFW flag stored from the last run unless its operator
-override or its own `safeForWork` says otherwise.
+restart too, NSFW verdicts apply as they are read, a retry keeps the ones an
+earlier attempt read, and none is lowered: a community keeps the NSFW flag
+stored from the last run unless its operator override or its own
+`safeForWork` says otherwise.
 
 `GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
 anything NSFW — the comment is flagged, or its community is — and `true`
