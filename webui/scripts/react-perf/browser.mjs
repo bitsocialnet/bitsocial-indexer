@@ -50,6 +50,36 @@ export async function freePort() {
   return port;
 }
 
+// Runs a command in its own process group. A terminal Ctrl-C reaches the whole
+// foreground group, so a repeated Ctrl-C would otherwise kill the wrapper's
+// cleanup midway and leave the machine-wide slot held by a running browser.
+// On timeout the whole group gets the SIGTERM execFile sent the command alone.
+function execShielded(file, args, { timeout, ...options }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => (stdout += chunk));
+    child.stderr.setEncoding('utf8').on('data', (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => {
+      try {
+        process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGTERM');
+      } catch (error) {
+        if (error.code !== 'ESRCH') reject(error);
+      }
+    }, timeout);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(Object.assign(new Error(`Command failed (${signal || code}): ${[file, ...args].join(' ')}\n${stderr}`), { code, signal, stdout, stderr }));
+    });
+  });
+}
+
 export async function withBrowser(packageRoot, headed, run) {
   const driver = browserDriver();
   const { stdout } = await exec('git', ['rev-parse', '--show-toplevel'], { cwd: packageRoot });
@@ -103,7 +133,7 @@ export async function withBrowser(packageRoot, headed, run) {
     }
     if (attempted && !busy) {
       try {
-        const result = await exec('bash', [wrapper, 'close', session], { cwd: repoRoot, env, timeout: 30000 });
+        const result = await execShielded('bash', [wrapper, 'close', session], { cwd: repoRoot, env, timeout: 30000 });
         process.stderr.write(result.stdout);
       } catch (error) {
         failures.push(error);

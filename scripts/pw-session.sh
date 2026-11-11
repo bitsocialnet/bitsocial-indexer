@@ -21,6 +21,16 @@ umask 077
 # workflow. When playwright-cli cannot be queried the lock is left alone, so a
 # broken CLI never silently disables the budget.
 #
+# A browser is not listed as open while it is still launching or already
+# shutting down, so the wrapper doing either stamps its PID into the lock for
+# that phase. The lock counts as held while that process is alive, for at most
+# a couple of minutes, so a wrapper killed mid-launch never pins the slot.
+#
+# Creating the lock with its metadata, and checking then renaming it away, each
+# run under a short kernel lock on `<lock>.mutex` (see serialize), so a lock
+# cannot change between a check and the rename, and the path is never left
+# open to another wrapper while a lock renamed by mistake is put back.
+#
 # PW_SESSION_POLL_SECONDS overrides how often `--wait` re-checks the slot.
 
 usage() {
@@ -62,12 +72,55 @@ fi
 owner_file="$lock_dir/owner"
 started_file="$lock_dir/started-at"
 workspace_file="$lock_dir/workspace"
+pid_file="$lock_dir/pid"
+mutex_file="${lock_dir}.mutex"
+mutex_wait_seconds=10
+transition_limit_seconds=120
 default_wait_seconds=300
 poll_seconds="${PW_SESSION_POLL_SECONDS:-5}"
 
 # Recorded for diagnostics only: the lock is machine-wide, so a checkout outside
 # a Git worktree is unusual but not an error.
 workspace="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Takes the mutex: a flock(2) lock on fd 9, through whichever of flock, lockf
+# or perl exists. The kernel drops it once every process holding fd 9 has
+# exited, so a wrapper killed while holding it never pins it, and the file is
+# never deleted, so there is no stale mutex to recover. Hold it only around
+# quick steps, and call unserialize before starting a browser, which would
+# otherwise inherit fd 9 and keep the mutex for its whole life. With none of the
+# three tools the steps run unserialized, as in copies of this script that
+# predate the mutex.
+serialize() {
+  if ! { exec 9>>"$mutex_file"; } 2>/dev/null; then
+    echo "pw-session: cannot open $mutex_file" >&2
+    return 1
+  fi
+  if command -v flock >/dev/null 2>&1; then
+    flock -w "$mutex_wait_seconds" 9 && return 0
+  elif command -v lockf >/dev/null 2>&1; then
+    lockf -s -t "$mutex_wait_seconds" 9 && return 0
+  elif command -v perl >/dev/null 2>&1; then
+    # Polls without blocking, so the wait stays bounded.
+    perl -MFcntl=:flock -e '
+      open(my $fh, ">&=", 9) or exit 1;
+      for (0 .. $ARGV[0] * 20) {
+        exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+        select(undef, undef, undef, 0.05);
+      }
+      exit 75;
+    ' "$mutex_wait_seconds" && return 0
+  else
+    return 0
+  fi
+  unserialize
+  echo "pw-session: could not lock $mutex_file within ${mutex_wait_seconds}s" >&2
+  return 1
+}
+
+unserialize() {
+  exec 9>&-
+}
 
 validate_session() {
   local session="$1"
@@ -82,6 +135,30 @@ current_owner() {
   if [ -f "$owner_file" ]; then
     sed -n '1p' "$owner_file"
   fi
+}
+
+# Prints what tells one lock apart from a later lock at the same path, for the
+# given lock directory (default: the current one).
+lock_identity() {
+  local dir="${1:-$lock_dir}" name value
+
+  for name in owner started-at pid; do
+    value=''
+    { IFS= read -r value <"$dir/$name"; } 2>/dev/null || true
+    printf '%s=%s;' "$name" "$value"
+  done
+}
+
+# True when the lock directory `dir` is still the one identified as
+# `expected`. An empty identity cannot tell a lock whose creator died right
+# after mkdir from one another contender has only just created (or from no
+# lock at all), so it only matches a directory that is still old.
+lock_matches() {
+  local dir="$1" expected="$2"
+
+  [ "$(lock_identity "$dir")" = "$expected" ] || return 1
+  [ "$expected" != 'owner=;started-at=;pid=;' ] ||
+    [ -n "$(find "$dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]
 }
 
 # Echoes `live`, `dead`, or `unknown` for a session name. `unknown` means the
@@ -114,7 +191,56 @@ session_state() {
   echo dead
 }
 
+# Marks this wrapper as starting or stopping the holder's browser.
+mark_transition() {
+  printf '%s %s\n' "$$" "$(date +%s)" >"$pid_file"
+}
+
+# Ends our own mark once the browser is listed as open.
+clear_transition() {
+  local pid='' rest=''
+
+  { read -r pid rest <"$pid_file"; } 2>/dev/null || true
+  if [ "$pid" = "$$" ]; then
+    rm -f "$pid_file"
+  fi
+}
+
+transition_active() {
+  local pid='' stamped='' rest=''
+
+  { read -r pid stamped rest <"$pid_file"; } 2>/dev/null || true
+  if [[ ! "$pid" =~ ^[0-9]+$ || ! "$stamped" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  [ $(($(date +%s) - stamped)) -lt "$transition_limit_seconds" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# Echoes `live`, `busy` (its browser is starting or stopping), `dead`, or
+# `unknown` for the current lock, given the owner read from it.
+lock_state() {
+  local owner="$1"
+
+  if [ ! -e "$lock_dir" ]; then
+    # Released meanwhile; the caller retries through the bounded reclaim path.
+    echo dead
+  elif transition_active; then
+    echo busy
+  elif [ -n "$owner" ]; then
+    session_state "$owner"
+  elif [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    # Never got an owner within a minute: its creator died right after mkdir.
+    echo dead
+  else
+    # Just created; its owner is being written.
+    echo busy
+  fi
+}
+
 write_lock_metadata() {
+  # Stamp before the owner: an owner without a stamp is judged by `list --all`,
+  # which cannot show this browser yet.
+  mark_transition
   printf '%s\n' "$1" >"$owner_file"
   date -u '+%Y-%m-%dT%H:%M:%SZ' >"$started_file"
   printf '%s\n' "$workspace" >"$workspace_file"
@@ -131,10 +257,11 @@ print_status() {
   owner="$(current_owner)"
   started="$(sed -n '1p' "$started_file" 2>/dev/null || true)"
   held_workspace="$(sed -n '1p' "$workspace_file" 2>/dev/null || true)"
-  state="$([ -n "$owner" ] && session_state "$owner" || echo unknown)"
+  state="$(lock_state "$owner")"
 
   case "$state" in
     live) echo "pw-session: browser slot is held" ;;
+    busy) echo "pw-session: browser slot is held (its browser is starting or stopping)" ;;
     dead) echo "pw-session: browser slot is held by a stale lock" ;;
     *) echo "pw-session: browser slot is held (browser state unverifiable)" ;;
   esac
@@ -146,6 +273,7 @@ print_status() {
 
   case "$state" in
     live) echo "Browser: running" ;;
+    busy) echo "Browser: starting or stopping" ;;
     dead)
       echo "Browser: not running — the next 'open' reclaims this slot automatically"
       ;;
@@ -155,38 +283,80 @@ print_status() {
   esac
 }
 
-# Atomically drop a lock we have confirmed is stale. Renaming first means only
-# one racing reclaimer can win, so a concurrent fresh lock is never deleted.
-reclaim_stale_lock() {
-  local owner="$1" staged="${lock_dir}.stale.$$"
+# Removes the lock if it is still the one the caller judged (`expected`, from
+# lock_identity). Call it under serialize. One rename takes the lock out of
+# service, so no contender sees it half-deleted. The renamed lock is checked
+# again because a copy of this script without the mutex can still replace the
+# lock in between; such a lock is put back instead of being deleted.
+remove_lock_if() {
+  local expected="$1" staged="${lock_dir}.$2.$$" name
 
-  if mv "$lock_dir" "$staged" 2>/dev/null; then
+  lock_matches "$lock_dir" "$expected" || return 1
+  rm -rf "$staged"
+  if ! mv "$lock_dir" "$staged" 2>/dev/null; then
+    return 1
+  fi
+  if lock_matches "$staged" "$expected"; then
     rm -rf "$staged"
+    return 0
+  fi
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    for name in pid owner started-at workspace; do
+      if [ -e "$staged/$name" ]; then
+        mv "$staged/$name" "$lock_dir/$name"
+      fi
+    done
+  else
+    echo "pw-session: warning: could not restore a lock renamed by mistake; another session took the slot first" >&2
+  fi
+  rm -rf "$staged"
+  return 1
+}
+
+# Drops a lock judged stale, but only that exact lock: reading `list --all`
+# takes a while, and meanwhile another contender may have reclaimed it and
+# acquired a fresh lock at the same path.
+reclaim_stale_lock() {
+  local owner="$1" expected="$2"
+
+  if remove_lock_if "$expected" stale; then
     echo "pw-session: reclaimed stale slot from '$owner' (its browser is no longer running)" >&2
   fi
 }
 
 acquire() {
-  local session="$1" wait_seconds="$2" owner state reclaims=0
+  local session="$1" wait_seconds="$2" identity owner state reclaims=0
 
   validate_session "$session"
   mkdir -p "$(dirname "$lock_dir")"
 
   SECONDS=0
   while true; do
+    # Under the mutex, no reclaim sees this lock before its metadata is
+    # written, and this mkdir never lands while a reclaim has a lock renamed
+    # away.
+    serialize || return 75
     if mkdir "$lock_dir" 2>/dev/null; then
       write_lock_metadata "$session"
+      unserialize
       echo "pw-session: acquired browser slot for '$session'"
       return 0
     fi
+    unserialize
 
+    # Identity first: if the lock changes before the owner is read, the
+    # verdict below then belongs to a newer lock and reclaim leaves it alone.
+    identity="$(lock_identity)"
     owner="$(current_owner)"
-    state="$([ -n "$owner" ] && session_state "$owner" || echo dead)"
+    state="$(lock_state "$owner")"
 
     # Bounded so an unremovable lock directory fails loudly instead of spinning.
     if [ "$state" = dead ] && [ "$reclaims" -lt 3 ]; then
       reclaims=$((reclaims + 1))
-      reclaim_stale_lock "${owner:-unknown}"
+      serialize || return 75
+      reclaim_stale_lock "${owner:-unknown}" "$identity"
+      unserialize
       continue
     fi
 
@@ -213,7 +383,7 @@ acquire() {
 }
 
 release() {
-  local session="$1" owner
+  local session="$1" identity owner
 
   validate_session "$session"
   if [ ! -d "$lock_dir" ]; then
@@ -221,17 +391,24 @@ release() {
     return 0
   fi
 
+  identity="$(lock_identity)"
   owner="$(current_owner)"
   if [ "$owner" != "$session" ]; then
     echo "pw-session: '$session' cannot release the slot held by '${owner:-unknown}'" >&2
-    if [ -n "$owner" ] && [ "$(session_state "$owner")" = dead ]; then
+    if [ "$(lock_state "$owner")" = dead ]; then
       echo "pw-session: that lock is stale; the next 'open' reclaims it automatically" >&2
     fi
     return 1
   fi
 
-  rm -f "$owner_file" "$started_file" "$workspace_file"
-  rmdir "$lock_dir"
+  # A lock that replaced ours after the check above stays in place.
+  serialize || return 1
+  if ! remove_lock_if "$identity" release; then
+    unserialize
+    echo "pw-session: the slot changed hands while '$session' released it; left it untouched" >&2
+    return 1
+  fi
+  unserialize
   echo "pw-session: released browser slot for '$session'"
 }
 
@@ -282,6 +459,7 @@ case "$command" in
       release "$session"
       exit 1
     fi
+    clear_transition
     ;;
   close)
     session="${2:-}"
@@ -294,6 +472,11 @@ case "$command" in
     # Cleanup must always stop the browser, even when the lock was lost, so a
     # failed workflow cannot strand a running engine.
     owner="$(current_owner)"
+    if [ "$owner" = "$session" ]; then
+      # Once the browser stops it is no longer listed as open; the stamp keeps
+      # contenders from reclaiming the slot before this wrapper releases it.
+      mark_transition 2>/dev/null || true
+    fi
     close_status=0
     "$playwright_cli" -s="$session" close || close_status=$?
     if [ "$close_status" -ne 0 ]; then
