@@ -49,30 +49,43 @@ export async function loadBlocklist(path: string): Promise<BlocklistEntry[]> {
 let lastMtimeMs: number | null = null; // null = never checked, -1 = file absent
 let timer: NodeJS.Timeout | undefined;
 
-/** Check the file's mtime and (re)apply it when it changed. Exported for tests. */
-export async function pollBlocklist(source = config.blocklistSource): Promise<void> {
-  if (!source) return;
+/**
+ * Check the file's mtime and (re)apply it when it changed. Resolves false when
+ * the file could not be loaded for any reason other than being absent.
+ * Exported for tests.
+ */
+export async function pollBlocklist(source = config.blocklistSource): Promise<boolean> {
+  if (!source) return true;
   let mtimeMs: number;
   try {
     mtimeMs = (await stat(source)).mtimeMs;
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      // The file may still be there (a permission or I/O error on its path):
+      // keep the previous blocklist, as for a file that will not parse.
+      console.error(`[blocklist] cannot check ${source}:`, err);
+      return false;
+    }
     // Missing file = empty blocklist (deleting the file restores everything).
     if (lastMtimeMs !== -1) {
       if (lastMtimeMs !== null) console.log(`[blocklist] ${source} is gone — blocklist cleared`);
       lastMtimeMs = -1;
       setBlocklist([]);
     }
-    return;
+    return true;
   }
-  if (mtimeMs === lastMtimeMs) return;
+  if (mtimeMs === lastMtimeMs) return true;
   try {
     const entries = await loadBlocklist(source);
     lastMtimeMs = mtimeMs;
     setBlocklist(entries);
     console.log(`[blocklist] applied ${entries.length} entries from ${source}`);
+    return true;
   } catch (err) {
     // A broken file keeps the previous blocklist; retried on the next poll.
     console.error(`[blocklist] failed to load ${source}:`, err);
+    return false;
   }
 }
 
@@ -82,7 +95,15 @@ export async function startBlocklist(): Promise<void> {
     setBlocklist([]); // clear takedowns left over from a previous configuration
     return;
   }
-  await pollBlocklist();
+  // Fail closed. At startup there is no previous list to keep: takedowns from
+  // the last run persist in the database, but ingest checks new comments
+  // against the in-memory list, so serving without it would publish new
+  // replies to a taken-down thread and blocklisted CIDs not yet indexed.
+  if (!(await pollBlocklist())) {
+    throw new Error(
+      `BLOCKLIST_SOURCE ${config.blocklistSource} exists but could not be loaded; not starting without it`,
+    );
+  }
   timer = setInterval(() => void pollBlocklist(), POLL_MS);
   timer.unref();
 }

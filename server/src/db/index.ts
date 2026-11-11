@@ -373,8 +373,9 @@ export function getCommunity(address: string): CommunitySummary | undefined {
  *   3. `directorySafeForWork` — the `features.safeForWork` of the directory the
  *      address is listed under (DIRECTORY_DEFAULTS_SOURCE), for a community
  *      whose owner never set the feature.
- *   4. `inferred`             — any indexed comment carries the protocol's
- *      `nsfw` flag, so the community accepts NSFW content.
+ *   4. `inferred`             — any served comment (not a tombstone or in the
+ *      mod queue) carries the protocol's `nsfw` flag, so the community accepts
+ *      NSFW content.
  *
  * Signals 2 and 3 are held in `safeForWork` polarity all the way here, exactly
  * like 5chan does: `undefined` (never declared) has to stay distinguishable
@@ -415,6 +416,13 @@ export interface NsfwOverride {
  */
 let nsfwOverrides = new Map<string, boolean>();
 let directorySafeForWork = new Map<string, boolean>();
+/**
+ * False while some of DIRECTORY_DEFAULTS_SOURCE has not been read: from startup
+ * until the crawler has fetched the lists (the server is already serving by
+ * then), and after a read that missed a list. Until then the map is not the
+ * whole answer for any address.
+ */
+let directoryComplete = !config.directoryDefaultsSource;
 
 /** A stored `safe_for_work` cell back as the three-state flag it represents. */
 const storedSafeForWork = (value: number | null): boolean | undefined =>
@@ -428,10 +436,17 @@ const storedSafeForWork = (value: number | null): boolean | undefined =>
  */
 export function applyNsfwSignals(): void {
   const database = getDb();
+  // Only comments still served count. A flagged post that moderators removed
+  // (or its author deleted, or the operator took down) is not content the
+  // community carries, and counting it would pin the community NSFW for good:
+  // a comment's own flag never clears (see insertComments).
   const inferred = new Set(
     (
       database
-        .prepare('SELECT DISTINCT community_address AS address FROM comments WHERE nsfw = 1')
+        .prepare(
+          `SELECT DISTINCT community_address AS address FROM comments
+            WHERE nsfw = 1 AND pending_approval = 0 AND removed = 0 AND deleted = 0 AND takedown = 0`,
+        )
         .all() as { address: string }[]
     ).map((r) => r.address),
   );
@@ -444,14 +459,18 @@ export function applyNsfwSignals(): void {
 
   database.transaction(() => {
     for (const row of rows) {
-      const next = resolveNsfw({
+      const signals: NsfwSignals = {
         override: nsfwOverrides.get(row.address),
         safeForWork: storedSafeForWork(row.safe_for_work),
         directorySafeForWork: directorySafeForWork.get(row.address),
         inferred: inferred.has(row.address),
-      })
-        ? 1
-        : 0;
+      };
+      // Not read yet is not "listed nowhere": a list not read yet may name the
+      // address NSFW, and the stricter directory verdict wins. Unless a signal
+      // that outranks the directory decides, keep a stored NSFW verdict instead
+      // of lowering it on what was read so far.
+      const awaitingDirectory = !directoryComplete && signals.override === undefined && signals.safeForWork === undefined;
+      const next = (resolveNsfw(signals) || (awaitingDirectory && row.nsfw === 1)) ? 1 : 0;
       if (next !== row.nsfw) update.run({ address: row.address, nsfw: next });
     }
   })();
@@ -467,12 +486,19 @@ export function setNsfwOverrides(entries: NsfwOverride[]): void {
  * Apply the directory-level `features.safeForWork` flags, already joined to
  * addresses (see crawler/crawler.ts). An address listed under two directories
  * takes the stricter verdict — one NSFW directory is enough to keep it out of a
- * safe-default search.
+ * safe-default search. `complete` is false when some directory's list could not
+ * be read: NSFW verdicts among the entries apply at once, but no stored NSFW
+ * verdict is lowered until a complete read (see applyNsfwSignals). A partial
+ * read adds to the verdicts earlier reads found rather than replacing them: the
+ * list it missed may be one an earlier read reached, and a community added
+ * since has no stored verdict to fall back on. Only a complete read replaces
+ * the lot.
  */
-export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[]): void {
-  const next = new Map<string, boolean>();
+export function setDirectorySafeForWork(entries: { address: string; safeForWork: boolean }[], complete = true): void {
+  const next = complete ? new Map<string, boolean>() : new Map(directorySafeForWork);
   for (const { address, safeForWork } of entries) next.set(address, (next.get(address) ?? true) && safeForWork);
   directorySafeForWork = next;
+  directoryComplete = complete;
   applyNsfwSignals();
 }
 
@@ -623,6 +649,10 @@ export function setBlocklist(entries: BlocklistEntry[]): void {
       }
     }
   })();
+  // A taken-down comment no longer counts towards NSFW inference, so the
+  // change applies now rather than at the next crawl pass. Otherwise
+  // restoring a flagged comment would leave its community lowered meanwhile.
+  applyNsfwSignals();
 }
 
 // ── search ───────────────────────────────────────────────────────────────────
@@ -851,6 +881,8 @@ export interface CommentInput {
  *   flags an already-indexed comment as pending, the row is kept but stops
  *   being served (and leaves the FTS index).
  * - removed/deleted comments stay as rows (tombstones) but leave the FTS index.
+ * - a servable comment whose title, content or author name changed (an author
+ *   edit) is re-indexed, so search matches what is stored.
  * - blocklisted CIDs (operator takedown) are marked on insert and never enter
  *   the FTS index — re-crawling cannot resurrect a takedown.
  * - `nsfw` only ever ratchets up, so a page that omits the flag cannot quietly
@@ -861,7 +893,8 @@ export interface CommentInput {
 export function insertComments(rows: CommentInput[]): number {
   const database = getDb();
   const selectPrior = database.prepare(
-    'SELECT community_address, pending_approval, removed, deleted, takedown FROM comments WHERE cid = ?',
+    `SELECT community_address, pending_approval, removed, deleted, takedown, title, content, author_name
+       FROM comments WHERE cid = ?`,
   );
   const moveCommunityArchive = database.prepare(
     'UPDATE comments SET community_address = @next WHERE community_address = @prior',
@@ -949,7 +982,10 @@ export function insertComments(rows: CommentInput[]): number {
       };
 
       const prior = selectPrior.get(r.cid) as
-        | { community_address: string; pending_approval: number; removed: number; deleted: number; takedown: number }
+        | Pick<
+            Comment,
+            'community_address' | 'pending_approval' | 'removed' | 'deleted' | 'takedown' | 'title' | 'content' | 'author_name'
+          >
         | undefined;
       if (prior && prior.community_address !== r.community_address) {
         // Seeing any still-live row through a canonical alias proves that the
@@ -980,11 +1016,18 @@ export function insertComments(rows: CommentInput[]): number {
       update.run(row);
       const wasServable = !prior.pending_approval && !prior.removed && !prior.deleted && !prior.takedown;
       const isServable = !pending && !removed && !deleted && !blocked && !prior.takedown;
+      // An author edit arrives as new text on the same CID. The UPDATE above
+      // stored it, so a row that stays servable has to be re-indexed too, or
+      // search keeps matching the old words and never the new ones.
+      const edited =
+        (row.title !== null && row.title !== prior.title)
+        || (row.content !== null && row.content !== prior.content)
+        || (row.author_name !== null && row.author_name !== prior.author_name);
       if (wasServable && !isServable) {
         deleteFts.run(r.cid);
-      } else if (!wasServable && isServable) {
+      } else if (isServable && (!wasServable || edited)) {
         const stored = selectStored.get(r.cid) as Pick<Comment, 'title' | 'content' | 'author_name'>;
-        deleteFts.run(r.cid); // defensive: never double-index
+        deleteFts.run(r.cid); // drops the edited-away text; never double-indexes
         insertFts.run({ cid: r.cid, title: stored.title, content: stored.content, author_name: stored.author_name });
       }
     }

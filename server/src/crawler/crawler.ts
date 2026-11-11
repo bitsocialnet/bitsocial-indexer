@@ -129,12 +129,30 @@ export function parseCommunityEntry(item: unknown): string | null {
 /** Bounds one list fetch, so a source that never answers cannot stall a reload forever. */
 const SOURCE_TIMEOUT_MS = 30_000;
 
+class HttpStatusError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+/**
+ * The source answered that it does not exist (HTTP 404, or no such local file),
+ * as opposed to failing to answer.
+ */
+function isMissingSource(err: unknown): boolean {
+  if (err instanceof HttpStatusError) return err.status === 404;
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 /** A JSON source is either an http(s) URL or a local file path. */
 async function loadJson(source: string): Promise<unknown> {
   if (/^https?:\/\//.test(source)) {
     const res = await fetch(source, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) });
     // An error body can be valid JSON; it is still not the list.
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new HttpStatusError(res.status);
     return res.json();
   }
   const { readFile } = await import('node:fs/promises');
@@ -173,6 +191,15 @@ export interface DirectorySafeForWork {
   safeForWork: boolean;
 }
 
+export interface DirectoryRead {
+  entries: DirectorySafeForWork[];
+  /**
+   * False when some directory's address list could not be read. A list the
+   * source reports missing (HTTP 404, no such file) counts as read and empty.
+   */
+  complete: boolean;
+}
+
 const DEFAULTS_SUFFIX = '-directories-defaults.json';
 
 /** One address-list fetch per directory code — 5chan currently has 64 of them. */
@@ -200,20 +227,26 @@ export function parseDirectoryDefaults(data: unknown): Map<string, boolean> {
   return found;
 }
 
-/** Join DIRECTORY_DEFAULTS_SOURCE's per-code verdicts onto community addresses. */
+/**
+ * Join DIRECTORY_DEFAULTS_SOURCE's per-code verdicts onto community addresses.
+ * `null` when the defaults file could not be read: like an unreadable
+ * COMMUNITIES_SOURCE, that is no answer, not an empty directory.
+ */
 export async function resolveDirectorySafeForWork(
   source = config.directoryDefaultsSource,
-): Promise<DirectorySafeForWork[]> {
-  if (!source) return [];
+): Promise<DirectoryRead | null> {
+  if (!source) return { entries: [], complete: true };
   let defaults: Map<string, boolean>;
   try {
     defaults = parseDirectoryDefaults(await loadJson(source));
   } catch (err) {
-    console.error(`[crawler] failed to load DIRECTORY_DEFAULTS_SOURCE (${source}):`, err);
-    return [];
+    // One line, not a stack: during an outage this repeats on every retry.
+    console.error(`[crawler] failed to load DIRECTORY_DEFAULTS_SOURCE (${source}): ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 
   const entries: DirectorySafeForWork[] = [];
+  let complete = true;
   await runWithConcurrency([...defaults], DIRECTORY_CONCURRENCY, async ([code, safeForWork]) => {
     const listSource = directoryListSource(source, code);
     if (!listSource) return;
@@ -225,9 +258,37 @@ export async function resolveDirectorySafeForWork(
     } catch (err) {
       // One unreachable directory file must not cost the others their verdict.
       console.error(`[crawler] directory ${code}: ${err instanceof Error ? err.message : String(err)}`);
+      // A list the source says does not exist is an answer: that directory
+      // names no address. Only a list that could not be read leaves the read
+      // incomplete; waiting for one that does not exist would stop every
+      // stored NSFW flag from being lowered, for good.
+      if (!isMissingSource(err)) complete = false;
     }
   });
-  return entries;
+  return { entries, complete };
+}
+
+let reloadingDirectory = false;
+
+/**
+ * Read DIRECTORY_DEFAULTS_SOURCE and apply it. Resolves true once every list
+ * was read. A failed read changes nothing, so the verdicts already applied (or,
+ * at startup, the ones stored last run) stand. Exported for tests.
+ */
+export async function reloadDirectory(source = config.directoryDefaultsSource): Promise<boolean> {
+  if (reloadingDirectory) return false;
+  reloadingDirectory = true;
+  try {
+    const directory = await resolveDirectorySafeForWork(source);
+    if (!directory) return false;
+    if (directory.entries.length) {
+      console.log(`[crawler] ${directory.entries.length} addresses carry a directory safeForWork verdict`);
+    }
+    setDirectorySafeForWork(directory.entries, directory.complete);
+    return directory.complete;
+  } finally {
+    reloadingDirectory = false;
+  }
 }
 
 // ── mapping: pkc-js comment → CommentInput ───────────────────────────────────
@@ -468,10 +529,28 @@ export async function tick(): Promise<void> {
 
 let timer: NodeJS.Timeout | undefined;
 let reloadTimer: NodeJS.Timeout | undefined;
+let directoryTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Read DIRECTORY_DEFAULTS_SOURCE, then retry on the reload interval until a
+ * read reaches every list.
+ */
+async function startDirectory(): Promise<void> {
+  if (await reloadDirectory()) return;
+  directoryTimer = setInterval(() => {
+    void reloadDirectory().then((complete) => {
+      if (complete) clearInterval(directoryTimer);
+    });
+  }, config.communitiesReloadMs);
+  console.log(`[crawler] retrying DIRECTORY_DEFAULTS_SOURCE every ${config.communitiesReloadMs}ms until it is read`);
+}
 
 export async function startCrawler(): Promise<void> {
   if (!hasConfiguredCommunities()) {
     console.log('[crawler] idle — no communities configured (COMMUNITIES / COMMUNITIES_SOURCE empty).');
+    // The archive is still served, and no stored NSFW flag is lowered until
+    // the directory has been read (see applyNsfwSignals).
+    if (config.directoryDefaultsSource) await startDirectory();
     return;
   }
   // An unreadable source still schedules the inline list and keeps the last
@@ -489,9 +568,7 @@ export async function startCrawler(): Promise<void> {
   }
   // The directory verdicts outrank inference, so apply them before the first
   // pass rather than after it.
-  const directory = await resolveDirectorySafeForWork();
-  if (directory.length) console.log(`[crawler] ${directory.length} addresses carry a directory safeForWork verdict`);
-  setDirectorySafeForWork(directory);
+  await startDirectory();
   const reclaimed = reclaimAbandoned();
   if (reclaimed) console.log(`[crawler] reclaimed ${reclaimed} crawl leases abandoned by a previous run`);
   console.log(
@@ -508,4 +585,5 @@ export async function startCrawler(): Promise<void> {
 export function stopCrawler(): void {
   if (timer) clearInterval(timer);
   if (reloadTimer) clearInterval(reloadTimer);
+  if (directoryTimer) clearInterval(directoryTimer);
 }

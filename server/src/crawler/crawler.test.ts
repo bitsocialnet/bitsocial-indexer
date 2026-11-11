@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -190,15 +192,59 @@ test('resolveDirectorySafeForWork joins the defaults onto every listed address',
   write('5chan-3-directory.json', { boards: [{ address: '3dcg.bso' }] });
   write('5chan-trash-directory.json', { boards: [{ address: 'off-topic.bso' }] });
 
-  const entries = await resolveDirectorySafeForWork(defaults);
+  const read = await resolveDirectorySafeForWork(defaults);
   assert.deepEqual(
-    entries.sort((a, b) => a.address.localeCompare(b.address)),
+    read?.entries.sort((a, b) => a.address.localeCompare(b.address)),
     [
       { address: '3dcg.bso', safeForWork: true },
       { address: 'flash-posting.bso', safeForWork: false },
       { address: 'flash-two.bso', safeForWork: false },
     ],
   );
+  // Waiting for a list that does not exist would keep every stored NSFW flag
+  // from being lowered for good, not just the ones that directory set.
+  assert.equal(read?.complete, true, 'a list that does not exist is an empty directory, not a failed read');
+});
+
+test('resolveDirectorySafeForWork over HTTP: a 404 list is empty, any other failure leaves the read incomplete', async () => {
+  const lists = { boards: [{ address: 'flash-posting.bso' }] };
+  const routes: Record<string, [number, unknown]> = {
+    '/answered/5chan-directories-defaults.json': [
+      200,
+      { directories: { f: { features: { safeForWork: false } }, gone: { features: { safeForWork: false } } } },
+    ],
+    '/answered/5chan-f-directory.json': [200, lists],
+    // /answered/5chan-gone-directory.json is not served: 404.
+    '/outage/5chan-directories-defaults.json': [
+      200,
+      { directories: { f: { features: { safeForWork: false } }, busy: { features: { safeForWork: false } } } },
+    ],
+    '/outage/5chan-f-directory.json': [200, lists],
+    '/outage/5chan-busy-directory.json': [503, { error: 'try again later' }],
+  };
+  const server = createServer((req, res) => {
+    const [status, body] = routes[req.url ?? ''] ?? [404, { error: 'not found' }];
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const flash = [{ address: 'flash-posting.bso', safeForWork: false }];
+    assert.deepEqual(await resolveDirectorySafeForWork(`${base}/answered/5chan-directories-defaults.json`), {
+      entries: flash,
+      complete: true,
+    });
+    assert.deepEqual(await resolveDirectorySafeForWork(`${base}/outage/5chan-directories-defaults.json`), {
+      entries: flash,
+      complete: false,
+    });
+    // The defaults file is the operator's own setting: without it nothing is
+    // known, so even a 404 there is no answer, retried and logged.
+    assert.equal(await resolveDirectorySafeForWork(`${base}/missing/5chan-directories-defaults.json`), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('resolveDirectorySafeForWork also reads the seedit `communities` shape', async () => {
@@ -213,14 +259,15 @@ test('resolveDirectorySafeForWork also reads the seedit `communities` shape', as
     JSON.stringify({ directoryCode: 'memes', communities: [{ address: 'memes.bso', publicKey: '12D3Koo' }] }),
   );
 
-  assert.deepEqual(await resolveDirectorySafeForWork(join(dir, 'seedit-directories-defaults.json')), [
-    { address: 'memes.bso', safeForWork: true },
-  ]);
+  assert.deepEqual(await resolveDirectorySafeForWork(join(dir, 'seedit-directories-defaults.json')), {
+    entries: [{ address: 'memes.bso', safeForWork: true }],
+    complete: true,
+  });
 });
 
-test('resolveDirectorySafeForWork stays silent when unconfigured or unreadable', async () => {
-  assert.deepEqual(await resolveDirectorySafeForWork(''), []);
-  assert.deepEqual(await resolveDirectorySafeForWork('/nonexistent/5chan-directories-defaults.json'), []);
+test('resolveDirectorySafeForWork: unconfigured is an empty directory, unreadable is no answer', async () => {
+  assert.deepEqual(await resolveDirectorySafeForWork(''), { entries: [], complete: true });
+  assert.equal(await resolveDirectorySafeForWork('/nonexistent/5chan-directories-defaults.json'), null);
 });
 
 test('mapComment groups legacy publications under the configured canonical address', () => {

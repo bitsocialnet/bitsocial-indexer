@@ -77,7 +77,7 @@ All config is environment variables (see [`server/.env.example`](server/.env.exa
 |-----|---------|---------|
 | `COMMUNITIES` | _(empty)_ | Comma-separated community addresses to index, e.g. `art.bso,tech.bso` |
 | `COMMUNITIES_SOURCE` | _(empty)_ | URL/path to a JSON list of community addresses (e.g. a client's directory). Overrides/augments `COMMUNITIES`. |
-| `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). |
+| `COMMUNITIES_RELOAD_MS` | `300000` | How often `COMMUNITIES_SOURCE` is re-read. Added communities are scheduled at once; dropped ones stop being crawled (see below). Also how often a failed `DIRECTORY_DEFAULTS_SOURCE` read is retried. |
 | `PKC_RPC_URL` | `ws://localhost:9138` | The `bitsocial-cli` daemon RPC endpoint |
 | `DB_PATH` | `./data/indexer.db` | SQLite file (`:memory:` for ephemeral) |
 | `CRAWL_INTERVAL_MS` | `60000` | Per-community delay before the next refresh |
@@ -110,12 +110,16 @@ defaults to `comment`; `thread` takes down a post **and all its replies** by
 the post's CID). Add a CID to the file and it is redacted within a minute —
 the file is re-read whenever it changes, no restart needed; remove the entry
 and the stored content is served again (the redaction never destroys the
-archived data). Blocklisted comments leave listings and search but stay in
-threads as redacted tombstones, marked `takedown: 1` (plus the optional
-`takedown_reason`) on the API so UIs can distinguish them from upstream
-moderation, and they stay redacted across re-crawls. The bundled web UI shows
-them as `[removed — takedown request]` and documents the policy on its
-`/legal` page (see `CONTACT_EMAIL` below).
+archived data). A file that will not load (invalid JSON, unreadable, or behind
+a directory the server cannot read) keeps the last list that loaded; only a
+file that does not exist empties the list. At startup there is no list to
+keep, so such a file stops the server from starting, while an absent file
+starts it with an empty list. Blocklisted comments leave listings and search
+but stay in threads as redacted tombstones, marked `takedown: 1` (plus the
+optional `takedown_reason`) on the API so UIs can distinguish them from
+upstream moderation, and they stay redacted across re-crawls. The bundled web
+UI shows them as `[removed — takedown request]` and documents the policy on
+its `/legal` page (see `CONTACT_EMAIL` below).
 
 #### NSFW communities
 
@@ -133,14 +137,17 @@ precedence first**:
    is a bare address or `{ "address": "…", "nsfw": false, "reason": "…" }`.
    `nsfw` defaults to `true`, and an explicit `false` clears the flag, so a bad
    verdict is correctable. Like the blocklist, the file is re-read whenever it
-   changes — no restart needed.
+   changes — no restart needed — and a file that exists but will not load stops
+   the server from starting.
 2. **`community.features.safeForWork`** — the owner's own declaration, read off
    the community on every crawl. `false` → NSFW, `true` → not, unset → the next
    signal decides.
 3. **The directory the address is listed under** — `DIRECTORY_DEFAULTS_SOURCE`
    (below), for the many communities whose owner never set the feature.
-4. **Inference from content** — any indexed comment in the community carrying
-   the protocol's `nsfw` flag means the community accepts NSFW content.
+4. **Inference from content** — any served comment in the community carrying
+   the protocol's `nsfw` flag means the community accepts NSFW content. A
+   flagged comment that was removed, deleted, taken down or sent back to the mod
+   queue no longer counts.
 
 An unset `safeForWork` is never read as either verdict: it falls through, and
 only the last signal (inference) is allowed to answer with a plain boolean.
@@ -162,7 +169,15 @@ DIRECTORY_DEFAULTS_SOURCE=https://raw.githubusercontent.com/bitsocialnet/lists/m
 Sibling file names follow the convention that repo documents, so one setting
 reaches every directory. A directory that states no `safeForWork`, or an address
 in no directory at all, contributes nothing and falls through to inference. Both
-files are read once, when the crawler schedules its communities.
+files are read once, when the crawler starts, even an idle one. A read that
+fails (the defaults file, or any directory's list) is retried every
+`COMMUNITIES_RELOAD_MS` until every list has been read. Until then, after a
+restart too, NSFW verdicts apply as they are read, a retry keeps the ones an
+earlier attempt read, and none is lowered: a community keeps the NSFW flag
+stored from the last run unless its operator override or its own
+`safeForWork` says otherwise. A directory's list that the source reports
+missing (HTTP 404, or no such file) is not a failed read: that directory names
+no address.
 
 `GET /api/search?nsfw=` filters on the result: `false` (**the default**) drops
 anything NSFW — the comment is flagged, or its community is — and `true`

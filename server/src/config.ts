@@ -32,7 +32,9 @@ export const config = {
 
   /**
    * How often COMMUNITIES_SOURCE is re-read. New entries are scheduled at once;
-   * entries the list dropped stop being crawled. See reloadCommunities.
+   * entries the list dropped stop being crawled. See reloadCommunities. Also
+   * the retry interval for a DIRECTORY_DEFAULTS_SOURCE read that missed a list
+   * (see reloadDirectory).
    */
   communitiesReloadMs: positiveDuration(process.env.COMMUNITIES_RELOAD_MS, 300_000, 'COMMUNITIES_RELOAD_MS'),
 

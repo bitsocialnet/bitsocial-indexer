@@ -5,6 +5,7 @@ import test from 'node:test';
 
 process.env.DB_PATH = ':memory:';
 const {
+  applyNsfwSignals,
   getCommunity,
   getThread,
   insertComments,
@@ -227,6 +228,27 @@ test('re-crawls refresh counters and last_seen_at but never blank archived conte
   assert.equal(post?.last_seen_at, now);
 });
 
+test('a re-crawl that edits a comment re-indexes its new text for search', () => {
+  const cid = 'op-edited';
+  insertComments([makeComment({ cid, title: 'kinkajou notes', content: 'original quetzal', author_name: 'Saola' })]);
+  assert.equal(searchPosts({ q: 'quetzal' }).total, 1);
+
+  // An author edit reaches the crawler as new text on the same CID.
+  insertComments([makeComment({ cid, title: 'fossa notes', content: 'edited binturong', author_name: 'Dhole' })]);
+  assert.equal(getThread(cid)?.post.content, 'edited binturong');
+  assert.equal(searchPosts({ q: 'binturong' }).total, 1, 'the edited body is searchable');
+  assert.equal(searchPosts({ selftext: 'binturong' }).total, 1);
+  assert.equal(searchPosts({ q: 'fossa' }).total, 1, 'the edited title is searchable');
+  assert.equal(searchPosts({ q: 'dhole' }).total, 1, 'the new display name is searchable');
+  for (const old of ['quetzal', 'kinkajou', 'saola']) {
+    assert.equal(searchPosts({ q: old }).total, 0, `the replaced text "${old}" no longer matches`);
+  }
+
+  // A re-crawl that omits the text keeps the stored text, and its index entry.
+  insertComments([makeComment({ cid, title: null, content: null, author_name: null })]);
+  assert.equal(searchPosts({ q: 'binturong' }).total, 1);
+});
+
 test('re-crawls move legacy-address rows under the configured canonical community', () => {
   const cid = 'op-legacy-community';
   const archivedCid = 'op-legacy-community-archived';
@@ -396,6 +418,37 @@ test('an update that omits nsfw never un-flags an already-flagged comment', () =
   assert.equal(getThread(cid)?.post.nsfw, 1);
   assert.equal(getThread(cid)?.post.upvote_count, 3, 'the rest of the update still applied');
   assert.equal(searchPosts({ q: 'serval', nsfw: false }).total, 0);
+});
+
+test('a flagged comment that stops being served no longer infers its community NSFW', () => {
+  // Undeclared and in no directory, so inference is the only signal left.
+  const community = 'nsfw-tombstone.bso';
+  upsertCommunity({ address: community, last_indexed_at: now });
+  for (const [state, change] of [
+    ['mod-removed', { removed: true }],
+    ['author-deleted', { deleted: true }],
+    ['back in the mod queue', { pending_approval: true }],
+  ] as const) {
+    const cid = `nsfw-tombstone-${state}`;
+    insertComments([makeComment({ cid, community_address: community, content: 'tombstoned margay', nsfw: true })]);
+    applyNsfwSignals();
+    assert.equal(getCommunity(community)?.nsfw, 1, 'a served flagged comment infers NSFW');
+
+    insertComments([makeComment({ cid, community_address: community, ...change })]);
+    applyNsfwSignals();
+    assert.equal(getCommunity(community)?.nsfw, 0, `a ${state} flagged comment no longer counts`);
+  }
+
+  const taken = 'nsfw-tombstone-takedown';
+  insertComments([makeComment({ cid: taken, community_address: community, content: 'tombstoned margay', nsfw: true })]);
+  applyNsfwSignals();
+  assert.equal(getCommunity(community)?.nsfw, 1);
+  // No crawl in between: the blocklist re-resolves on its own, so restoring a
+  // flagged comment re-raises its community before the next crawl pass.
+  setBlocklist([{ cid: taken, scope: 'comment', reason: null }]);
+  assert.equal(getCommunity(community)?.nsfw, 0, 'a taken-down flagged comment no longer counts');
+  setBlocklist([]);
+  assert.equal(getCommunity(community)?.nsfw, 1, 'restoring it brings the inference back');
 });
 
 test('stats count only servable comments', () => {
