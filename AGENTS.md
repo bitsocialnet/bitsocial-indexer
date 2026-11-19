@@ -2,6 +2,8 @@
 
 The React application is in `webui/`. Run its commands there using npm and the committed `package-lock.json`. Use `npm ci` after dependency changes and `npm run perf:install` once to provision the runner's browser.
 
+For native controls, focus behavior, browser APIs, or browser-sensitive layout in `webui/`, consult [Modern Web Guidance](.agents/skills/modern-web-guidance/SKILL.md) for the relevant feature.
+
 ## Automatic React verification
 
 Run `npm run agent:verify` after relevant React changes. It runs the pinned React Doctor check, type checking, `perf:check` (which includes the collector compatibility/regression self-test before the deterministic application scenarios), and a normal production build. Do not run `perf:test` separately before `perf:check`; use it only when investigating the compatibility harness in isolation. CI runs the same checks and uploads `.react-perf` evidence, including on failures. Doctor inspects source patterns; it does not measure runtime performance or replace the runtime checks. Fix findings introduced by your change and report existing relevant findings without chasing an aggregate score.
