@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.build.json && cp src/db/schema.sql dist/db/",
     "start": "node dist/index.js",
     "seed": "tsx src/db/seed.ts",
+    "snapshot": "tsx src/snapshot.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

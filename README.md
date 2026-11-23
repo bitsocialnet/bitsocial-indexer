@@ -258,6 +258,34 @@ as its redacted tombstone, though only for the bare lookup: with `author`,
 search, since a yes/no answer over redacted content would leak it. A CID mixed
 with other words is an ordinary text search.
 
+## Snapshots
+
+`npm run snapshot -- <output-dir>` (or `node dist/snapshot.js <output-dir>` in
+the Docker image) writes a downloadable copy of everything the instance serves:
+
+| File | Contents |
+|------|----------|
+| `communities.jsonl.gz` | One community per line, as `GET /api/communities` returns it |
+| `comments.jsonl.gz` | One comment per line, as `GET /api/posts/:cid` returns it, grouped by thread with the original post first |
+| `manifest.json` | Format name and version, creation time, and record count, size and SHA-256 of each file |
+
+A snapshot holds only what the API serves. Mod-queue comments are left out.
+Removed, deleted and taken-down comments stay as tombstones with their content
+nulled, so threads keep their shape. With `BLOCKLIST_SOURCE` set, the file is
+read again and applied on top of the takedowns already stored, so an entry the
+server has not polled yet is still redacted. If that file cannot be read, no
+snapshot is written. The export only reads the database. With
+`BLOCKLIST_SOURCE` unset, only stored takedowns apply.
+
+The export runs in one read transaction while the crawler keeps writing. It
+never overwrites: the output directory must not exist yet, and a failed run
+leaves nothing behind. In Docker, run it next to the server, for example
+`docker compose exec server node dist/snapshot.js /data/snapshots/2026-11-23`.
+
+Content taken down after a snapshot is published remains in that copy. Publish
+snapshots somewhere you can replace them, and generate a new one after each
+takedown.
+
 ## Running your own instance
 
 `bitsocial-indexer` is a **tool, not a hosted service** — there is no central

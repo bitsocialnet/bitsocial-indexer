@@ -559,10 +559,14 @@ export interface BlocklistEntry {
 let blocklist = new Map<string, BlocklistEntry>();
 
 /** The entry redacting this comment, if any (its own CID, or its thread's root). */
-function blockedBy(cid: string, postCid: string): BlocklistEntry | undefined {
-  const own = blocklist.get(cid);
+function blockedBy(
+  cid: string,
+  postCid: string,
+  list: Map<string, BlocklistEntry> = blocklist,
+): BlocklistEntry | undefined {
+  const own = list.get(cid);
   if (own) return own;
-  const root = blocklist.get(postCid);
+  const root = list.get(postCid);
   return root?.scope === 'thread' ? root : undefined;
 }
 
@@ -623,6 +627,36 @@ export function setBlocklist(entries: BlocklistEntry[]): void {
       }
     }
   })();
+}
+
+// ── snapshot export ──────────────────────────────────────────────────────────
+
+/**
+ * Every comment the API serves, redacted exactly as getThread redacts it, for
+ * the snapshot export (see ../snapshot.ts): mod-queue rows are left out, and
+ * removed, deleted and taken-down comments keep their row with the content
+ * nulled, so thread structure survives. Grouped by thread, original post first.
+ *
+ * `extra` is the operator blocklist read straight from its file. It can only
+ * add takedowns on top of the stored flags, never lift one, so a snapshot
+ * taken before the server's next poll still honours a just-added entry. It is
+ * applied to the yielded rows only; the database is not written.
+ *
+ * Iterates a live statement: the connection stays busy until the generator is
+ * exhausted or returned, so the caller must not run other queries meanwhile.
+ */
+export function* servedComments(extra: BlocklistEntry[] = []): Generator<ServedComment> {
+  const list = new Map(extra.map((e) => [e.cid, e]));
+  const rows = getDb()
+    .prepare(
+      `${SERVED_SELECT} WHERE ${NOT_PENDING}
+        ORDER BY c.community_address, c.post_cid, c.depth > 0, c.timestamp, c.cid`,
+    )
+    .iterate() as IterableIterator<ServedComment>;
+  for (const row of rows) {
+    const hit = row.takedown ? undefined : blockedBy(row.cid, row.post_cid, list);
+    yield serve(hit ? { ...row, takedown: 1, takedown_reason: hit.reason } : row);
+  }
 }
 
 // ── search ───────────────────────────────────────────────────────────────────
