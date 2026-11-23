@@ -14,10 +14,18 @@ const dir = mkdtempSync(join(tmpdir(), 'indexer-snapshot-'));
 test.after(() => rmSync(dir, { recursive: true, force: true }));
 
 const raw = (cid: string) => JSON.stringify({ cid, signature: 'sig' });
+/** The OP's CommentUpdate preloads its replies, captured before the mods removed one. */
+const opRaw = JSON.stringify({
+  comment: { cid: 'op', signature: 'sig' },
+  commentUpdate: {
+    cid: 'op',
+    replies: { pages: { best: { comments: [{ comment: { content: 'mod removed this', author: { address: 'addr-removed' } }, commentUpdate: { cid: 'removed', number: 2 } }] } } },
+  },
+});
 
 upsertCommunity({ address: 'snap.bso', title: 'Snapshot board' });
 insertComments([
-  { cid: 'op', community_address: 'snap.bso', post_cid: 'op', depth: 0, timestamp: 10, title: 'kept title', content: 'kept body', author_name: 'anon', author_address: 'addr-op', link: 'https://example.com/a.png', raw: raw('op') },
+  { cid: 'op', community_address: 'snap.bso', post_cid: 'op', depth: 0, timestamp: 10, title: 'kept title', content: 'kept body', author_name: 'anon', author_address: 'addr-op', link: 'https://example.com/a.png', raw: opRaw },
   { cid: 'live', community_address: 'snap.bso', post_cid: 'op', parent_cid: 'op', depth: 1, timestamp: 11, content: 'live reply', author_address: 'addr-live', raw: raw('live') },
   { cid: 'removed', community_address: 'snap.bso', post_cid: 'op', parent_cid: 'op', depth: 1, timestamp: 12, content: 'mod removed this', author_address: 'addr-removed', removed: true, mod_reason: 'rule 1', raw: raw('removed') },
   { cid: 'deleted', community_address: 'snap.bso', post_cid: 'op', parent_cid: 'op', depth: 1, timestamp: 13, content: 'author deleted this', author_address: 'addr-deleted', deleted: true, raw: raw('deleted') },
@@ -82,7 +90,10 @@ test('a snapshot holds what the API serves, with tombstones and file takedowns r
   const op = byCid.get('op');
   assert.equal(op?.content, 'kept body');
   assert.equal(op?.link, 'https://example.com/a.png');
-  assert.equal(op?.raw, raw('op'));
+  assert.deepEqual(JSON.parse(op?.raw as string), {
+    comment: { cid: 'op', signature: 'sig' },
+    commentUpdate: { cid: 'op', replies: { pages: { best: { comments: [{ commentUpdate: { cid: 'removed', number: 2 } }] } } } },
+  });
   assert.equal(op?.archived, 0);
   assert.equal(byCid.get('live')?.content, 'live reply');
 

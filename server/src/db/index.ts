@@ -262,13 +262,71 @@ function one<T>(sql: string, params: Record<string, unknown> = {}): T | undefine
   return (Object.keys(params).length ? stmt.get(params) : stmt.get()) as T | undefined;
 }
 
+type JsonRecord = Record<string, unknown>;
+const isJsonRecord = (value: unknown): value is JsonRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * A CommentUpdate's preloaded reply pages, reduced to what identifies each
+ * reply: its cid, its post number, and its own reply pages, reduced the same
+ * way. Everything else (the reply's signed comment with its content, link and
+ * author, its other update fields) is dropped.
+ */
+function replySkeleton(replies: unknown, depth: number): JsonRecord | undefined {
+  if (!isJsonRecord(replies) || !isJsonRecord(replies.pages) || depth > 50) return undefined;
+  const pages: JsonRecord = {};
+  for (const [name, page] of Object.entries(replies.pages)) {
+    if (!isJsonRecord(page) || !Array.isArray(page.comments)) continue;
+    pages[name] = {
+      comments: page.comments.map((reply) => {
+        const update = isJsonRecord(reply) && isJsonRecord(reply.commentUpdate) ? reply.commentUpdate : {};
+        const kept: JsonRecord = {};
+        if (typeof update.cid === 'string') kept.cid = update.cid;
+        if (typeof update.number === 'number') kept.number = update.number;
+        const nested = replySkeleton(update.replies, depth + 1);
+        if (nested) kept.replies = nested;
+        return { commentUpdate: kept };
+      }),
+    };
+  }
+  return { pages };
+}
+
+/**
+ * `raw` as served. An OP's (or reply's) CommentUpdate embeds the reply pages
+ * the network preloads with it: copies of other comments taken at crawl time.
+ * When one of those replies is later removed, deleted or taken down, its own
+ * row is redacted but the copy in its parent's `raw` is not, so the pages are
+ * reduced to cids and post numbers (see replySkeleton). Each reply is served
+ * as its own row anyway. The numbers stay because a redacted reply's number
+ * survives only here. This alters the CommentUpdate the community signed, so
+ * that signature no longer verifies against a served `raw`; the comment's own
+ * signed record is untouched. Unparseable `raw` is not served at all.
+ */
+function redactRaw(raw: string | null): string | null {
+  if (!raw || !raw.includes('"replies"')) return raw;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isJsonRecord(parsed)) return null;
+  const update = parsed.commentUpdate;
+  if (!isJsonRecord(update) || !('replies' in update)) return raw;
+  const { replies, ...rest } = update;
+  const skeleton = replySkeleton(replies, 0);
+  return JSON.stringify({ ...parsed, commentUpdate: skeleton ? { ...rest, replies: skeleton } : rest });
+}
+
 /**
  * Tombstone redaction: removed (mod) / deleted (author) / takedown (operator
  * blocklist) comments keep their row so thread structure survives, but their
- * content is never served.
+ * content is never served. Served rows also never carry other comments'
+ * content through their `raw` (see redactRaw).
  */
 function serve(row: ServedComment): ServedComment {
-  if (!row.removed && !row.deleted && !row.takedown) return row;
+  if (!row.removed && !row.deleted && !row.takedown) return { ...row, raw: redactRaw(row.raw) };
   return {
     ...row,
     title: null,

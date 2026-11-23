@@ -602,3 +602,80 @@ test('search: a CID hit keeps total, page and limit consistent', () => {
   const second = searchPosts({ q: cid, limit: 5, page: 2 });
   assert.deepEqual([second.total, second.page, second.limit, second.posts.length], [1, 2, 5, 0], 'page 2 of one hit is empty but still counts it');
 });
+
+test('served raw keeps only cids and numbers of the reply pages its CommentUpdate embeds', () => {
+  const embedded = {
+    comment: { content: 'own body', signature: { signature: 'op-sig' } },
+    commentUpdate: {
+      cid: 'raw-op',
+      number: 3,
+      upvoteCount: 5,
+      replies: {
+        pageCids: { new: 'QmPage' },
+        pages: {
+          best: {
+            nextCid: 'QmNext',
+            comments: [
+              {
+                comment: { content: 'embedded secret reply', link: 'https://example.com/secret.png', author: { address: 'secret-author' } },
+                commentUpdate: {
+                  cid: 'raw-reply',
+                  number: 7,
+                  edit: { content: 'edited secret' },
+                  replies: { pages: { best: { comments: [{ comment: { content: 'nested secret' }, commentUpdate: { cid: 'raw-nested', number: 8 } }] } } },
+                },
+              },
+              'not a comment',
+            ],
+          },
+        },
+      },
+    },
+  };
+  insertComments([makeComment({ cid: 'raw-op', content: 'raw op body', raw: JSON.stringify(embedded) })]);
+
+  const served = [
+    getThread('raw-op')?.post.raw,
+    listPosts({ community: COMMUNITY, limit: 100 }).posts.find((p) => p.cid === 'raw-op')?.raw,
+    searchPosts({ q: 'raw op body' }).posts.find((p) => p.cid === 'raw-op')?.raw,
+  ];
+  for (const raw of served) {
+    assert.ok(raw);
+    assert.doesNotMatch(raw, /secret/);
+    assert.deepEqual(JSON.parse(raw), {
+      comment: embedded.comment,
+      commentUpdate: {
+        cid: 'raw-op',
+        number: 3,
+        upvoteCount: 5,
+        replies: {
+          pages: {
+            best: {
+              comments: [
+                {
+                  commentUpdate: {
+                    cid: 'raw-reply',
+                    number: 7,
+                    replies: { pages: { best: { comments: [{ commentUpdate: { cid: 'raw-nested', number: 8 } }] } } },
+                  },
+                },
+                { commentUpdate: {} },
+              ],
+            },
+          },
+        },
+      },
+    });
+  }
+});
+
+test('served raw is unchanged without reply pages and withheld when it does not parse', () => {
+  // A `replies` key outside the CommentUpdate is not a reply page: parsed, then served as stored.
+  const plain = JSON.stringify({ comment: { content: 'plain body', replies: 'not pages' }, commentUpdate: { number: 4 } });
+  insertComments([
+    makeComment({ cid: 'raw-plain', raw: plain }),
+    makeComment({ cid: 'raw-broken', raw: '{"commentUpdate":{"replies": ' }),
+  ]);
+  assert.equal(getThread('raw-plain')?.post.raw, plain);
+  assert.equal(getThread('raw-broken')?.post.raw, null);
+});
